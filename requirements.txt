@@ -1,0 +1,22 @@
+# Core (required)
+networkx>=3.6
+PyJWT>=2.13
+cryptography>=50.0
+fastapi>=0.141
+uvicorn>=0.52
+pydantic>=2
+
+# Persistent knowledge backends (Phase 1). Falls back to in-memory stores
+# when unset via VECTOR_STORE_BACKEND=memory / GRAPH_STORE_BACKEND=memory.
+kuzu>=0.11
+chromadb>=1.5
+
+# Real embedder / LLM backends. Only imported when EMBEDDER_BACKEND=voyage
+# or the API layer constructs AnthropicLLMClient; not needed for the
+# default hash-embedder + scripted-LLM test path.
+voyageai>=0.3
+anthropic>=0.40
+
+# Dev/test
+pytest>=9
+httpx>=0.28
