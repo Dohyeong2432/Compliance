@@ -20,6 +20,11 @@ pip install -r requirements.txt
 python -m pytest -q          # 전체 테스트 (기본 in-memory 백엔드로 실행)
 ```
 
+`LocalFileRegulationConnector`(사규 원문 docx/doc/pdf 로더)를 쓰려면 시스템에
+CLI 도구 `pandoc`, `catdoc`, `pdftotext`(poppler-utils 패키지)가 설치되어 있어야
+합니다 (`apt-get install pandoc catdoc poppler-utils`). Python 패키지만으로는
+해결되지 않는 부분이라 requirements.txt에는 포함되어 있지 않습니다.
+
 ## 환경변수(.env) 관리
 
 비밀값(SSO 시크릿, API 키 등)은 `.env.example`을 복사해 `.env`로 만들고 채우세요.
@@ -48,6 +53,26 @@ components = build_components()
 pipeline = IngestPipeline(components.embedder, components.vector_store, components.graph_store)
 seed_all(pipeline)
 ```
+
+`data/raw/regulation/`에 올려둔 사규 원문(docx/doc/pdf)을 채우려면:
+
+```python
+from bootstrap import build_components
+from pipeline.ingest import IngestPipeline
+from pipeline.connectors.local_file import LocalFileRegulationConnector
+
+components = build_components()
+pipeline = IngestPipeline(components.embedder, components.vector_store, components.graph_store)
+connector = LocalFileRegulationConnector("data/raw/regulation")
+pipeline.ingest_connector(connector)
+print("실패:", connector.errors)  # DRM/손상 등으로 못 읽은 파일과 사유
+```
+
+`LocalFileRegulationConnector`는 실 EDMS 연동 전까지 쓰는 임시 로더이며, 시스템에
+다음 CLI 도구가 설치되어 있어야 합니다: `pandoc`(.docx), `catdoc`(.doc, 레거시
+CP949 인코딩), `pdftotext`(.pdf, poppler-utils 패키지). 확장자만 `.docx`인데
+실제로는 DRM 등으로 암호화된 파일은 파싱에 실패하며 `connector.errors`에 사유와
+함께 남고, 나머지 파일 처리는 막히지 않습니다.
 
 ## 환경변수
 

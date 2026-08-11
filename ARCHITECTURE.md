@@ -80,6 +80,22 @@
 (`_build_request`)과 응답 파싱(`_parse_response`)을 분리해 API 키 없이도 단위
 테스트가 가능합니다.
 
+실사규 4건을 `LocalFileRegulationConnector`로 색인해 재현한 두 번째 사례:
+"자금세탁방지 고객확인" 질의에서 실제 정답 문서(자금세탁행위 등 방지 업무규정
+시행세칙)의 원점수는 0.049로, `DEFAULT_MIN_SCORE`(0.05) 바로 아래에서 걸러져
+검색결과 0건이 됐습니다. Voyage 등 의미 기반 임베더로 교체하기 전까지는 이런
+근소한 컷오프 탈락이 상시 발생할 수 있다는 뜻이며, `DEFAULT_MIN_SCORE`를 낮추는
+임시방편은 그만큼 무관한 문서의 오검색률을 높이므로 권장하지 않습니다.
+
+### `pipeline/connectors/local_file.py`
+`LocalFileRegulationConnector`는 `data/raw/regulation/`에 올려둔 사규 원문
+(docx/doc/pdf)을 `pandoc`/`catdoc`/`pdftotext` CLI로 텍스트 추출해
+`RawDocument`로 변환합니다. 실 EDMS 연동(`RegulationConnector`) 전까지 쓰는
+임시 로더입니다. 파일 하나가 파싱 실패해도(예: 확장자만 `.docx`인 DRM 암호화
+파일) 전체 배치가 죽지 않고 `connector.errors`에 사유와 함께 기록되며 나머지
+파일은 정상 처리됩니다 — 이 동작은 실제로 4개 사규 파일 중 1개가 사내 문서보안
+솔루션(`DOCUMENT SAFER`)으로 암호화되어 있던 것을 만나며 확인했습니다.
+
 ### `knowledge/retriever.py`
 `HybridRetriever.retrieve()`가 위 "전체 흐름"의 5단계를 그대로 구현합니다.
 `dept` 없이는 호출 자체가 `ValueError`로 거부됩니다 — RBAC를 생략한 검색 경로가
