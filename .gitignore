@@ -4,6 +4,11 @@ __pycache__/
 .venv/
 *.egg-info/
 
+# Secrets -- never commit. .env.example documents the required keys.
+.env
+.env.*
+!.env.example
+
 # Runtime-generated knowledge backends and logs -- not source documents.
 data/chroma/
 data/graph.kuzu

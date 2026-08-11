@@ -5,6 +5,7 @@ cryptography>=50.0
 fastapi>=0.141
 uvicorn>=0.52
 pydantic>=2
+python-dotenv>=1.0
 
 # Persistent knowledge backends (Phase 1). Falls back to in-memory stores
 # when unset via VECTOR_STORE_BACKEND=memory / GRAPH_STORE_BACKEND=memory.

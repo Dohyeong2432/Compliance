@@ -20,11 +20,20 @@ pip install -r requirements.txt
 python -m pytest -q          # 전체 테스트 (기본 in-memory 백엔드로 실행)
 ```
 
+## 환경변수(.env) 관리
+
+비밀값(SSO 시크릿, API 키 등)은 `.env.example`을 복사해 `.env`로 만들고 채우세요.
+`.env`는 `.gitignore`에 있어 커밋되지 않으며, `bootstrap.py`가 시작 시 자동으로
+읽어들입니다(이미 shell에 export된 값이 있으면 그쪽이 우선합니다).
+
+```bash
+cp .env.example .env
+# .env 파일을 열어 SSO_JWT_SECRET 등 실제 값 채우기
+```
+
 로컬 개발 서버 (in-memory 백엔드, SSO는 반드시 설정해야 요청이 열립니다):
 
 ```bash
-export SSO_JWT_ALGORITHM=HS256
-export SSO_JWT_SECRET="로컬-테스트용-시크릿-32바이트-이상"
 uvicorn api.main:app --reload
 ```
 

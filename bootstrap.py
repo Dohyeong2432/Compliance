@@ -11,6 +11,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()  # no-op if no .env file is present; never overrides already-set env vars
+except ImportError:
+    pass
+
 from agent.audit import AuditLogger
 from agent.sso import SSOConfig
 from knowledge.embedder import Embedder, HashEmbedder, VoyageEmbedder
