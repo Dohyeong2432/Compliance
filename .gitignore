@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
 .venv/
 *.egg-info/
+
+# Runtime-generated knowledge backends and logs -- not source documents.
+data/chroma/
+data/graph.kuzu
+data/audit.jsonl
+
+# data/raw/ is intentionally tracked: staged source documents (regulations,
+# etc.) waiting to be ingested. See data/raw/regulation/README.md.
