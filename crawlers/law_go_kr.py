@@ -40,10 +40,19 @@ pipeline.connectors.law.LawConnector(fetch_items=...)에 연결하려면:
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import date
 from typing import Any
+
+# ChromeDriverManager().install()이 사용 중인 Chrome 버전에 맞는 드라이버를
+# 찾으려고 googlechromelabs.github.io에 HTTPS로 접속하는데, 사내망처럼
+# TLS를 중간에서 검사(SSL 인터셉션)하는 환경에서는 이 요청의 인증서 검증이
+# 실패한다(SSLCertVerificationError: unable to get local issuer certificate).
+# 원본 common_functions.py도 정확히 이 문제를 이 env var로 우회하고
+# 있었다 -- import 시점에 설정해야 ChromeDriverManager가 이 값을 읽는다.
+os.environ.setdefault("WDM_SSL_VERIFY", "0")
 
 import pandas as pd
 from bs4 import BeautifulSoup as bs
