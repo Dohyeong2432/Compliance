@@ -252,34 +252,214 @@ def _finalize(table_list: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 상세 페이지(본문/제개정사항/신구조문대비표) -- 실제 HTML을 봐야 구현 가능
+# 본문 조회 페이지(#bodyContent) 파싱
+#
+# "본문" 버튼(id=bdyBtnKO)을 누르면 AJAX로 #bodyContent가 채워지는데, 시행
+# 예정인 개정이 걸려 있는 법령은 조문마다 두 벌이 함께 표시된다:
+#   1. <div class="pgroup"><div class="lawcon">...</div></div>
+#      -- 현재 시행 중인 조문 텍스트
+#   2. (있다면 바로 뒤에) <div class="pgroup babl">...</div>
+#      -- 아직 시행 전인 개정 조문 텍스트. 바뀐 부분은
+#         style="color: rgb(255, 0, 0)"로 표시되고, 하단에
+#         "[시행일: YYYY. M. D.] 제N조" 각주로 그 시행일이 붙는다.
+# 이 두 벌을 각각 독립된 시계열 버전으로 뽑아, 아래 law_detail_to_items()가
+# RawDocument의 effective_date/superseded_date/supersedes로 그대로 연결한다
+# -- ontology/schema.py의 SUPERSEDES 체인이 원래 이걸 위해 만들어진 장치다.
 # ---------------------------------------------------------------------------
 
-def fetch_law_detail(browser: webdriver.Chrome, listing_row: dict[str, Any]) -> dict[str, Any]:
-    """listing_row(crawl_listing()이 반환한 한 행, __href/__onclick 포함)로
-    상세 페이지에 접근해 본문/제개정이유/신구조문대비표를 파싱해 반환.
+_JO_ANCHOR = re.compile(r"^J(\d+):(\d+)$")
+_EFYD_FOOTNOTE = re.compile(r"\[시행일:\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\]")
 
-    TODO: law.go.kr 법령/행정규칙 본문 조회 페이지, 신구조문대비표 페이지의
-    실제 HTML을 받으면 구현합니다. 지금은 목록 행 원본만 그대로 돌려줍니다.
+
+def _input_value(soup: bs, input_id: str) -> str:
+    tag = soup.find("input", id=input_id)
+    return tag.get("value", "") if tag is not None else ""
+
+
+def _yyyymmdd_to_iso(value: str) -> str | None:
+    if not value or len(value) != 8 or not value.isdigit():
+        return None
+    return f"{value[0:4]}-{value[4:6]}-{value[6:8]}"
+
+
+def _extract_pgroup_text(container) -> tuple[str, str]:
+    """container(현행 조문이면 <div class="pgroup">, 시행예정 조문이면
+    <div class="pgroup babl">)에서 (본문 전체 텍스트, 조문 제목)을 뽑는다.
+    제목은 두 경우 모두 class="bl" 요소 안에 있다 -- 현행은
+    <span class="bl"><label>제목</label></span>, 시행예정은
+    <span class="bl">제목</span> 뿐이라 구조가 다르지만 class="bl"의
+    get_text()로 통일해서 처리한다."""
+    root = container.find("div", class_="lawcon") or container
+    title_el = root.find(class_="bl")
+    title = title_el.get_text(strip=True) if title_el else ""
+    lines = [p.get_text(" ", strip=True) for p in root.find_all("p")]
+    return "\n".join(line for line in lines if line), title
+
+
+def _parse_article(anchor, pgroup) -> dict[str, Any]:
+    jo_no, jo_br_no = _JO_ANCHOR.match(anchor["name"]).groups()
+    body, title = _extract_pgroup_text(pgroup)
+
+    upcoming = None
+    sibling = pgroup.find_next_sibling()
+    if sibling is not None and "babl" in (sibling.get("class") or []):
+        upcoming_body, upcoming_title = _extract_pgroup_text(sibling)
+        m = _EFYD_FOOTNOTE.search(upcoming_body)
+        upcoming_effective = f"{int(m[1]):04d}-{int(m[2]):02d}-{int(m[3]):02d}" if m else None
+        upcoming = {"title": upcoming_title or title, "body": upcoming_body, "effective_date": upcoming_effective}
+
+    return {"jo_no": jo_no, "jo_br_no": jo_br_no, "title": title, "body": body, "upcoming": upcoming}
+
+
+def _parse_addenda(soup: bs) -> list[dict[str, Any]]:
+    ar_div = soup.find("div", id="arDivArea")
+    if ar_div is None:
+        return []
+    addenda = []
+    for anchor in ar_div.find_all("a", attrs={"name": True}):
+        name = anchor["name"]
+        if name == "arArea" or not name.startswith("J") or ":" in name:
+            continue  # 조문 앵커("J1:0")와 구분 -- 부칙 앵커는 콜론이 없다
+        pgroup = anchor.find_next_sibling("div", class_="pgroup")
+        if pgroup is None:
+            continue
+        header = pgroup.find("p", class_="pty3")
+        lines = [header.get_text(" ", strip=True)] if header else []
+        lines += [
+            p.get_text(" ", strip=True)
+            for p in pgroup.find_all("p", class_=re.compile(r"^pty3_dep"))
+        ]
+        addenda.append({"id": name[1:], "body": "\n".join(line for line in lines if line)})
+    return addenda
+
+
+def parse_law_body_html(html: str) -> dict[str, Any]:
+    """"본문" 버튼을 누른 뒤 렌더링된 #bodyContent(또는 그 상위 #bodyContentTOP)의
+    outerHTML을 파싱해 법령 메타데이터 + 조문별 텍스트(현행/시행예정) + 부칙을
+    반환한다. 순수 파싱 함수라 Selenium/네트워크 없이 단위 테스트 가능
+    (tests/fixtures/law_go_kr_body.html, tests/test_law_go_kr_crawler.py 참고).
     """
-    raise NotImplementedError(
-        "상세 페이지 파싱 미구현 -- law.go.kr 본문 조회/신구조문대비표 페이지의 "
-        "HTML을 공유해주시면 구현하겠습니다. 그 전까지는 crawl_listing()의 결과"
-        "(법령명/공포일자 + __href/__onclick)만 사용할 수 있습니다."
+    soup = bs(html, "html.parser")
+
+    meta = {
+        "law_id": _input_value(soup, "lsId"),
+        "law_name": _input_value(soup, "lsNm"),
+        "revision_seq": _input_value(soup, "lsiSeq"),
+        "promulgation_no": _input_value(soup, "ancNo"),
+        "promulgation_date": _yyyymmdd_to_iso(_input_value(soup, "ancYd")),
+        "effective_date": _yyyymmdd_to_iso(_input_value(soup, "efYd")),
+    }
+
+    articles = []
+    for anchor in soup.find_all("a", attrs={"name": _JO_ANCHOR}):
+        pgroup = anchor.find_next_sibling("div", class_="pgroup")
+        if pgroup is not None:
+            articles.append(_parse_article(anchor, pgroup))
+    meta["articles"] = articles
+    meta["addenda"] = _parse_addenda(soup)
+    return meta
+
+
+def law_detail_to_items(meta: dict[str, Any], source_url: str = "") -> list[dict[str, Any]]:
+    """parse_law_body_html()의 결과를 LawConnector(fetch_items=...)가 기대하는
+    list[dict] 스키마로 변환. 조문 하나당 최소 1개(현행), 시행 예정 개정이
+    걸려 있으면 2개(현행 + 시행예정, SUPERSEDES로 연결) 아이템을 만든다."""
+    law_id, law_name, effective_date = meta["law_id"], meta["law_name"], meta["effective_date"]
+    items: list[dict[str, Any]] = []
+
+    for art in meta["articles"]:
+        base = f"{law_id}-{art['jo_no']}-{art['jo_br_no']}"
+        upcoming = art.get("upcoming")
+        upcoming_effective = upcoming["effective_date"] if upcoming else None
+
+        items.append({
+            "id": f"{base}@{effective_date}",
+            "title": f"{law_name} {art['title']}".strip(),
+            "body": art["body"],
+            "effective_date": effective_date,
+            "superseded_date": upcoming_effective,
+            "source_url": source_url,
+        })
+
+        if upcoming and upcoming_effective:
+            items.append({
+                "id": f"{base}@{upcoming_effective}",
+                "title": f"{law_name} {upcoming['title']}".strip(),
+                "body": upcoming["body"],
+                "effective_date": upcoming_effective,
+                "source_url": source_url,
+                "supersedes": f"law:{base}@{effective_date}",
+            })
+
+    for addendum in meta["addenda"]:
+        items.append({
+            "id": f"{law_id}-ar-{addendum['id']}",
+            "title": f"{law_name} 부칙",
+            "body": addendum["body"],
+            "source_url": source_url,
+        })
+
+    return items
+
+
+# ---------------------------------------------------------------------------
+# 목록 -> 상세 페이지 이동 (미검증)
+# ---------------------------------------------------------------------------
+
+def fetch_law_body_html(browser: webdriver.Chrome, listing_row: dict[str, Any]) -> str:
+    """listing_row(crawl_listing()이 반환한 한 행, "법령명__href"/"법령명__onclick"
+    포함)로 상세 페이지에 접근해 "본문" 버튼까지 눌러 #bodyContent가 채워진
+    뒤의 outerHTML을 반환.
+
+    주의: parse_law_body_html()과 달리 이 함수는 실제 사이트에서 실행해
+    검증하지 못했습니다 -- __onclick/__href 값이 실제로 어떻게 상세 페이지로
+    이어지는지, "본문" 버튼(#bdyBtnKO)을 눌러야 하는지 아니면 목록 클릭만으로
+    이미 본문이 뜨는지는 crawl_listing() 결과를 직접 실행해봐야 확정됩니다.
+    """
+    href = listing_row.get("법령명__href") or listing_row.get("행정규칙명__href")
+    onclick = listing_row.get("법령명__onclick") or listing_row.get("행정규칙명__onclick")
+
+    if href:
+        base = browser.current_url.split("?")[0].rsplit("/", 1)[0]
+        browser.get(href if href.startswith("http") else f"{base}/{href.lstrip('/')}")
+    elif onclick:
+        browser.execute_script(onclick.removesuffix("return false;"))
+    else:
+        raise ValueError("listing_row에 상세 페이지로 갈 href/onclick이 없습니다")
+
+    WebDriverWait(browser, 10).until(
+        lambda b: b.execute_script("return document.readyState") == "complete"
     )
+    try:
+        browser.find_element(By.ID, "bdyBtnKO").click()
+    except Exception:
+        pass  # 이미 본문이 기본 표시되는 화면일 수 있음
+
+    WebDriverWait(browser, 10).until(
+        lambda b: len(b.find_elements(By.CSS_SELECTOR, "#bodyContent .pgroup")) > 0
+    )
+    return browser.find_element(By.ID, "bodyContentTOP").get_attribute("outerHTML")
 
 
-def crawl_law_items(from_date: date | None = None) -> list[dict[str, Any]]:
+def crawl_law_items(browser: webdriver.Chrome | None = None, from_date: date | None = None) -> list[dict[str, Any]]:
     """LAW_CRAWLER=crawlers.law_go_kr:crawl_law_items 로 연결되는 진입점.
 
-    pipeline.connectors.crawler_base.CrawledSourceConnector가 기대하는
-    {"id", "title", "body", "effective_date", ...} 스키마를 아직 만들 수
-    없습니다(본문이 없으므로) -- fetch_law_detail이 채워지면 완성됩니다.
+    browser를 넘기지 않으면 새로 띄우고 끝에 닫습니다. fetch_law_body_html()이
+    아직 미검증이므로, 처음 시도할 때는 소량(예: from_date로 최근 며칠)으로
+    먼저 결과를 확인해보는 걸 권장합니다.
     """
-    raise NotImplementedError(
-        "본문 파싱이 아직 없어 LawConnector에 바로 연결할 수 없습니다. "
-        "지금 당장 목록만 확인해보려면 이 모듈의 crawl_listing()을 직접 호출하세요."
-    )
+    owns_browser = browser is None
+    browser = browser or get_browser()
+    try:
+        items: list[dict[str, Any]] = []
+        for _, row in crawl_listing(browser, "law", stop_before=from_date).iterrows():
+            html = fetch_law_body_html(browser, row.to_dict())
+            meta = parse_law_body_html(html)
+            items.extend(law_detail_to_items(meta, source_url=browser.current_url))
+        return items
+    finally:
+        if owns_browser:
+            browser.quit()
 
 
 if __name__ == "__main__":

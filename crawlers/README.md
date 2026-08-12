@@ -20,40 +20,63 @@ Selenium이 Chrome을 직접 실행하므로 로컬 PC(또는 Chrome이 설치�
 
 - **목록 검색(법령명·공포일자 / 행정규칙명·발령일자)**: 동작합니다.
   `crawl_listing(browser, "law")` / `crawl_listing(browser, "reg")`.
-- **본문 / 제개정사항 / 신구조문대비표**: 아직 미구현입니다
-  (`fetch_law_detail`, `crawl_law_items`가 `NotImplementedError`를 던짐).
-  law.go.kr 상세 페이지의 실제 HTML 구조를 확인해야 정확한 선택자를 쓸 수
-  있어서, 추측으로 셀렉터를 하드코딩하지 않았습니다.
+- **본문 파싱**: `parse_law_body_html()`이 실제 "본문" 버튼(`#bdyBtnKO`) 클릭
+  결과 HTML을 파싱합니다 — 법령 메타데이터(법령ID/명/공포번호·일자/시행일,
+  `lsId`/`lsNm`/`ancNo`/`ancYd`/`efYd` hidden input 기반), 조문별 본문, 부칙까지
+  추출하며 `tests/test_law_go_kr_crawler.py`가 실제 law.go.kr 결과 HTML
+  fixture(`tests/fixtures/law_go_kr_body.html`)로 검증합니다.
+  - **"신구조문대비표"에 대한 발견**: 별도 페이지(`lsOldAndNew`) 없이도, 시행
+    예정 개정이 걸린 법령은 본문 페이지 자체가 조문마다 "현행 텍스트"
+    (`<div class="pgroup">`)와 "시행예정 텍스트"(`<div class="pgroup babl">`,
+    바뀐 부분 빨간색)를 **함께** 보여줍니다. `parse_law_body_html()`이 이
+    두 벌을 각각 뽑아 `law_detail_to_items()`에서 `SUPERSEDES` 관계로 연결하므로
+    (현행 버전의 `superseded_date` = 시행예정 버전의 시행일), **"미래 개정
+    대비"는 이미 됩니다.** 다만 이건 "지금 vs 곧 시행될 버전" 비교이지,
+    "예전 개정 vs 그 이전"처럼 과거 이력 간 비교는 아닙니다 — 그게 필요하면
+    `lsOldAndNew`/연혁 페이지 HTML을 추가로 공유해주세요.
+  - **제정·개정이유**(`lsRvsDocInfoR`)는 아직 별도 파싱 대상이 아닙니다 —
+    본문 페이지의 `[전문개정 YYYY.MM.DD.]` 같은 각주 수준으로만 딸려 옵니다.
+- **목록 → 본문 페이지 이동**: `fetch_law_body_html()`을 만들어뒀지만
+  **미검증**입니다 — `crawl_listing()`이 캡처한 `__href`/`__onclick`이 실제로
+  상세 페이지로 이어지는지, `#bdyBtnKO`를 눌러야 본문이 뜨는지는 실제 사이트
+  에서 한 번 돌려봐야 확정됩니다. `crawl_law_items()`가 이걸 엮어서
+  `LAW_CRAWLER` 진입점 역할을 하지만, 처음에는 `from_date`로 소량만 시도해
+  보길 권합니다.
 
-## 이어서 구현하려면 (택 1)
+## 더 다듬고 싶다면
 
-1. **스크래핑 계속 (Selenium/BeautifulSoup)**: 다음 페이지들의 HTML(뷰
-   소스)을 공유해주세요.
-   - 법령 본문 조회 페이지 (조문이 나열된 화면)
-   - 행정규칙 본문 조회 페이지
-   - 신구조문대비표 페이지
-   - (선택) 실제로 `crawl_listing()`을 한 번 돌려서 나온 `*__href`/`*__onclick`
-     값 샘플 — 상세 페이지로 가는 링크를 코드가 어떻게 해석해야 하는지 확인용
-2. **law.go.kr Open API 사용 (권장)**: [open.law.go.kr](https://open.law.go.kr)에서
-   OC 인증키를 발급받으면, `lawService.do` 등으로 조문 본문을 XML/JSON으로 바로
-   받을 수 있어 Selenium 없이 `requests`만으로 훨씬 안정적으로 구현할 수
-   있습니다(신구조문대비 정보 제공 여부는 발급받은 API 문서로 재확인이
-   필요합니다). OC 키가 있다면 알려주세요 — 목록 검색도 이 API로 통일해서
-   Selenium 의존성 자체를 없애는 것도 가능합니다.
+1. `fetch_law_body_html()`을 실제로 한 번 돌려서 결과를 알려주시면(성공/실패,
+   어느 지점에서 막히는지) 이어서 고치겠습니다.
+2. 과거 개정 이력 간 비교(연혁/신구법비교 페이지)가 필요하면 그 페이지의
+   HTML을 공유해주세요.
+3. **law.go.kr Open API 사용(대안)**: [open.law.go.kr](https://open.law.go.kr)에서
+   OC 인증키를 발급받으면 `lawService.do` 등으로 조문 본문을 XML/JSON으로 바로
+   받을 수 있어 Selenium 없이 `requests`만으로 더 안정적으로 구현할 수
+   있습니다. OC 키가 있다면 알려주세요 — 목록 검색까지 API로 통일해 Selenium
+   의존성 자체를 없애는 것도 가능합니다.
 
 ## `pipeline.connectors.law.LawConnector`에 연결하는 법
 
-본문 파싱이 완성되면, `crawl_law_items()`가 다음 스키마의 `list[dict]`를
-반환하도록 맞춥니다(자세한 스키마는
-[`pipeline/connectors/crawler_base.py`](../pipeline/connectors/crawler_base.py) 참고):
+`law_detail_to_items()`가 `pipeline/connectors/crawler_base.py`가 기대하는
+`list[dict]` 스키마로 이미 변환해줍니다. 조문 하나가 시행 예정 개정을
+가지고 있으면 이렇게 두 항목이 나옵니다(실제 `tests/test_law_go_kr_crawler.py`
+결과 예시):
 
 ```python
 {
-    "id": "capital-markets-act-46",         # 법령/행정규칙 고유 식별자
-    "title": "자본시장과 금융투자업에 관한 법률 제46조",
-    "body": "...",                            # 조문 본문 (+ 필요시 제개정이유)
-    "effective_date": "2023-07-01",
-    "supersedes": "law:capital-markets-act-46-v1",  # 신구조문대비표에서 얻은 구법 id
+    "id": "011359-1-0@2026-08-04",          # 현행 버전
+    "title": "전기통신금융사기 피해 방지 및 피해금 환급에 관한 특별법 제1조(목적)",
+    "body": "...",
+    "effective_date": "2026-08-04",
+    "superseded_date": "2026-10-01",         # 시행예정 버전이 있으면 자동으로 채워짐
+    "source_url": "https://www.law.go.kr/...",
+},
+{
+    "id": "011359-1-0@2026-10-01",          # 시행예정 버전
+    "title": "전기통신금융사기 피해 방지 및 피해금 환급에 관한 특별법 제1조(목적)",
+    "body": "...",
+    "effective_date": "2026-10-01",
+    "supersedes": "law:011359-1-0@2026-08-04",  # SUPERSEDES 관계 자동 생성
     "source_url": "https://www.law.go.kr/...",
 }
 ```
