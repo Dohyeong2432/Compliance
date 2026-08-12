@@ -105,6 +105,11 @@ law.go.kr Open API는 인증키가, 금융위/금감원 질의회신·제재정�
 `RawDocument`/관계로 변환하는 것만 담당합니다. dict 스키마는
 [`pipeline/connectors/crawler_base.py`](pipeline/connectors/crawler_base.py) 참고.
 
+law.go.kr 크롤러는 [`crawlers/law_go_kr.py`](crawlers/law_go_kr.py)에 실제
+구현되어 있고, `crawl_watchlist_items_incremental()`이 매 사이클 전체를 다시
+크롤링하는 대신 공포일자/발령일자가 바뀐 법령만 상세 페이지를 다시 여는
+증분 버전입니다 — 자세한 동작 방식은 [`crawlers/README.md`](crawlers/README.md) 참고.
+
 ```python
 def crawl_law_items() -> list[dict]:
     ...  # law.go.kr Open API 호출 + XML 파싱은 직접 구현
@@ -164,6 +169,7 @@ curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO J
 | `REVIEW_DOCS_DIR` | `./data/raw/review` | 검토서 원문 스테이징 디렉터리 (부서별 하위 폴더로 RBAC 구분) |
 | `FAQ_DOCS_DIR` | `./data/raw/faq` | FAQ 원문 스테이징 디렉터리 |
 | `LAW_CRAWLER` / `INTERPRETATION_CRAWLER` / `CASE_CRAWLER` | - | `모듈:함수` 형태의 실 크롤러 콜백. 미설정 시 해당 소스는 재색인에서 제외 |
+| `LAW_CRAWL_STATE_PATH` | `./data/law_crawl_state.json` | `crawl_watchlist_items_incremental` 사용 시, 법령별 마지막 공포일자/파싱 결과 캐시 경로 |
 | `SYNC_INTERVAL_SECONDS` | `1800` | 주기 재색인 간격(초). `0`이면 시작 시 1회만 수행 |
 | `SYNC_STATE_PATH` | `./data/sync_state.json` | 삭제 감지용 소스별 마지막 id 목록 저장 경로 |
 

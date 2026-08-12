@@ -61,20 +61,22 @@ Selenium이 Chrome을 직접 실행하므로 로컬 PC(또는 Chrome이 설치�
     못했습니다 — 처음엔 `crawl_law_items(from_date=...)`로 범위를 좁히거나,
     이름 하나로 `fetch_law_item_by_name()`을 먼저 확인해보길 권합니다.
 
-### 추적 대상만 색인: `crawl_watchlist_items()` (권장)
+### 추적 대상만 색인: `crawl_watchlist_items()` / `crawl_watchlist_items_incremental()` (권장)
 
 law.go.kr 전체를 도는 대신, 실제 업무 관련 법령/행정규칙만 골라둔
 `crawlers/law_watchlist.py`의 `LAW_WATCHLIST`(사용자가 관리하는
 법규리스트.xlsx에서 그대로 옮긴 164개 항목)만 찾아서 색인하는 진입점입니다.
+둘 다 반환 스키마는 동일하고, 차이는 "매번 164개 상세 페이지를 전부
+여는가"입니다.
 
 ```python
-from crawlers.law_go_kr import crawl_watchlist_items
+from crawlers.law_go_kr import crawl_watchlist_items, crawl_watchlist_items_incremental
 
-items = crawl_watchlist_items()  # LAW_WATCHLIST 전체를 기본으로 사용
+items = crawl_watchlist_items()               # 매번 164개 전부 상세 페이지를 엶
+items = crawl_watchlist_items_incremental()    # 공포일자/발령일자가 바뀐 것만 상세 페이지를 엶 (권장)
 ```
 
-- 이름 하나마다 `open_law_or_reg_detail_by_name()` → `get_body_content_html()`
-  → `parse_law_body_html()` → `law_detail_to_items()`를 거쳐 결과를 모읍니다.
+공통:
 - 목록에 없거나 사이트 구조가 달라 파싱이 실패하는 항목이 있어도 전체를
   멈추지 않고 그 항목만 로그로 남기고 건너뜁니다(`logging.getLogger(__name__)`).
 - `names=[...]`로 특정 이름만 넘겨 부분 실행/디버깅도 가능합니다.
@@ -84,10 +86,32 @@ items = crawl_watchlist_items()  # LAW_WATCHLIST 전체를 기본으로 사용
 - 새 법령/행정규칙을 추적하려면 `crawlers/law_watchlist.py`의
   `LAW_WATCHLIST`에 이름만 추가하면 됩니다.
 
+**`crawl_watchlist_items_incremental()`이 증분을 확인하는 방식**: 상세
+페이지(본문 파싱)를 여는 게 제일 비쌉니다. 그런데 목록 테이블(이미 검증된
+`crawl_listing()`)에는 상세 페이지를 열지 않아도 공포일자/발령일자가 이미
+나와 있습니다. 그래서:
+
+1. `_watchlist_date_lookup()`이 `crawl_listing()`으로 법령/행정규칙 목록
+   전체를 한 번씩 훑어서, watchlist 164개 이름 각각의 현재 공포일자/발령일자를
+   저렴하게(상세 페이지 없이) 확인합니다.
+2. 그 날짜를 상태 파일(`LAW_CRAWL_STATE_PATH`, 기본
+   `./data/law_crawl_state.json`)에 저장해둔 지난번 날짜와 비교합니다.
+3. 같으면 상세 페이지를 다시 열지 않고, 지난번에 파싱해서 상태 파일에
+   캐시해둔 결과를 그대로 재사용합니다. 다르거나(공포/개정) 처음 보는
+   이름이면 그때만 상세 페이지를 열어 새로 파싱하고, 새 날짜/결과로 캐시를
+   갱신합니다.
+4. 상세 페이지 크롤링이 실패해도(네트워크 에러 등), 캐시가 있으면 그걸
+   대신 반환합니다 — 실패했다고 결과에서 아예 빠지면, `pipeline/sync.py`의
+   `IngestSyncer`가 "소스에서 사라진 문서"로 오인해서 다음 사이클에
+   그래프/벡터 스토어에서 삭제해버리기 때문입니다. (반대로 첫 실행부터
+   캐시가 없는 상태에서 실패하면 그 항목은 이번엔 빠집니다 — 다음 사이클에
+   다시 시도됩니다.)
+
 `.env`에는 아래처럼 지정하면 됩니다(전체 수집용 `crawl_law_items` 대신):
 
 ```
-LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items
+LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items_incremental
+LAW_CRAWL_STATE_PATH=./data/law_crawl_state.json   # 생략 시 기본값 그대로 사용
 ```
 
 ## 더 다듬고 싶다면

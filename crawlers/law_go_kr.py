@@ -32,7 +32,11 @@ click_row_by_number/wait_for_detail_page 자체는 참고 코드에서 검증된
 fetch_law_item_by_name()을 직접 호출하세요.
 
 pipeline.connectors.law.LawConnector(fetch_items=...)에 연결하려면:
-    LAW_CRAWLER=crawlers.law_go_kr:crawl_law_items
+    LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items_incremental
+(law_watchlist.LAW_WATCHLIST 164개만, 공포일자/발령일자가 안 바뀐 건 상세
+페이지를 다시 열지 않는 증분 버전 -- 매 사이클 164개를 전부 여는
+crawl_watchlist_items()보다 이쪽을 기본으로 권장합니다. 전체 법령/행정규칙을
+훑는 crawl_law_items()도 있지만 아직 실사이트 미검증입니다.)
 행정규칙도 같은 EntityType.LAW로 색인합니다(자체 REGULATION은 "사내" 규정
 전용이라 행정규칙과는 다른 범주라고 판단했습니다 -- 다르게 나누고 싶으면
 알려주세요).
@@ -40,11 +44,13 @@ pipeline.connectors.law.LawConnector(fetch_items=...)에 연결하려면:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import time
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 # ChromeDriverManager().install()이 사용 중인 Chrome 버전에 맞는 드라이버를
@@ -555,6 +561,125 @@ def crawl_watchlist_items(
                 items.extend(law_detail_to_items(meta, source_url=browser.current_url))
             except Exception:
                 logging.getLogger(__name__).exception("watchlist 항목 '%s' 크롤링 실패, 건너뜀", name)
+        return items
+    finally:
+        if owns_browser:
+            browser.quit()
+
+
+# ---------------------------------------------------------------------------
+# 증분 크롤링: 상세 페이지를 열기 전에, 이미 검증된 crawl_listing()으로
+# 공포일자/발령일자가 지난번과 같은지부터 저렴하게 확인한다.
+#
+# 상세 페이지(본문 파싱)를 여는 게 이 크롤러에서 제일 비싼 부분이다 --
+# crawl_watchlist_items()는 164개를 매번 전부 연다. 반면 목록 테이블에는
+# 상세 페이지를 열지 않고도 공포일자/발령일자가 이미 나와 있으므로, 그
+# 날짜가 지난번과 같으면 본문이 안 바뀌었다고 보고 상세 페이지를 건너뛴다.
+#
+# 주의: pipeline.sync.IngestSyncer는 매 사이클 fetch_items()가 반환한
+# id 전체를 "현재 상태"로 보고, 거기 없는 id는 "소스에서 사라졌다"고
+# 판단해 그래프/벡터 스토어에서 삭제한다. 그래서 이 함수는 안 바뀐
+# 법령도 (상세 페이지를 다시 열지 않을 뿐) 반드시 결과에 포함해야 한다 --
+# 지난번에 파싱해둔 결과를 상태 파일에 캐시해뒀다가 그대로 재사용하는
+# 이유가 이것이다. 바뀐 것만 반환하면 다음 사이클에 나머지가 전부
+# "사라진 문서"로 오인되어 삭제된다.
+# ---------------------------------------------------------------------------
+
+
+def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[str, str]:
+    """watchlist 이름별 현재 공포일자/발령일자를 상세 페이지 없이 확인한다.
+
+    law -> reg 순으로 전체 목록을 한 번씩 훑는다(open_law_or_reg_detail_by_name과
+    동일한 우선순위: law에서 이미 찾았으면 reg는 보지 않는다). 여러 건이
+    매치되면(동명이인/개정 이력 등) 가장 최근 날짜를 취한다.
+    """
+    normalized_targets = {re.sub(r"[^가-힣]", "", n).strip(): n for n in names}
+    found: dict[str, str] = {}
+
+    for site_category in ("law", "reg"):
+        name_col, date_col = get_column_name(site_category)
+        table_df = crawl_listing(browser, site_category)
+        if table_df.empty or name_col not in table_df or date_col not in table_df:
+            continue
+
+        normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
+        for normalized, original_name in normalized_targets.items():
+            if original_name in found:
+                continue
+            matches = table_df[normalized_col == normalized]
+            if matches.empty:
+                continue
+            dates = pd.to_datetime(matches[date_col], errors="coerce").dropna()
+            if not dates.empty:
+                found[original_name] = dates.max().strftime("%Y-%m-%d")
+
+    return found
+
+
+def _load_watchlist_state(state_path: Path) -> dict[str, dict[str, Any]]:
+    if not state_path.exists():
+        return {}
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logging.getLogger(__name__).warning("법령 크롤 상태 파일을 읽지 못했습니다: %s (빈 상태로 시작)", state_path)
+        return {}
+
+
+def _save_watchlist_state(state_path: Path, state: dict[str, dict[str, Any]]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def crawl_watchlist_items_incremental(
+    browser: webdriver.Chrome | None = None,
+    names: list[str] | None = None,
+    state_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items_incremental 로
+    연결되는, crawl_watchlist_items()의 증분 버전. 반환 스키마는 동일하다.
+
+    이름마다 무조건 상세 페이지를 여는 대신, _watchlist_date_lookup()으로
+    공포일자/발령일자가 지난번(state_path에 저장된 값)과 같은지 먼저 본다.
+    같으면 상세 페이지를 열지 않고 지난번 파싱 결과를 그대로 재사용하고,
+    다르거나(개정/공포) 처음 보는 이름이면 그때만 상세 페이지를 연다.
+    상세 페이지 크롤링이 실패해도 지난번 캐시가 있으면 그걸 대신 반환한다
+    (실패했다고 결과에서 빠지면 다음 사이클에 "사라진 문서"로 오인 삭제됨).
+    """
+    from crawlers.law_watchlist import LAW_WATCHLIST
+
+    names = names if names is not None else LAW_WATCHLIST
+    state_file = Path(state_path or os.environ.get("LAW_CRAWL_STATE_PATH", "./data/law_crawl_state.json"))
+    state = _load_watchlist_state(state_file)
+    logger = logging.getLogger(__name__)
+
+    owns_browser = browser is None
+    browser = browser or get_browser()
+    try:
+        current_dates = _watchlist_date_lookup(browser, names)
+
+        items: list[dict[str, Any]] = []
+        for name in names:
+            cached = state.get(name)
+            current_date = current_dates.get(name)
+
+            if cached is not None and current_date is not None and cached.get("date") == current_date:
+                items.extend(cached["items"])
+                continue
+
+            try:
+                open_law_or_reg_detail_by_name(browser, name)
+                html = get_body_content_html(browser)
+                meta = parse_law_body_html(html)
+                new_items = law_detail_to_items(meta, source_url=browser.current_url)
+                items.extend(new_items)
+                state[name] = {"date": current_date or meta.get("effective_date"), "items": new_items}
+            except Exception:
+                logger.exception("watchlist 항목 '%s' 크롤링 실패", name)
+                if cached is not None:
+                    items.extend(cached["items"])
+
+        _save_watchlist_state(state_file, state)
         return items
     finally:
         if owns_browser:

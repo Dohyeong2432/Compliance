@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 from selenium.common.exceptions import TimeoutException
 
@@ -8,6 +10,7 @@ import crawlers.law_go_kr as law_go_kr
 from crawlers.law_go_kr import (
     click_row_by_number,
     crawl_watchlist_items,
+    crawl_watchlist_items_incremental,
     law_detail_to_items,
     open_law_or_reg_detail_by_name,
     parse_law_body_html,
@@ -284,3 +287,142 @@ def test_crawl_watchlist_items_defaults_to_law_watchlist(monkeypatch):
     crawl_watchlist_items(browser=MagicMock())
 
     assert seen_names == LAW_WATCHLIST
+
+
+# ---------------------------------------------------------------------------
+# _watchlist_date_lookup / crawl_watchlist_items_incremental
+# ---------------------------------------------------------------------------
+
+def test_watchlist_date_lookup_prefers_law_over_reg_and_picks_latest_date(monkeypatch):
+    law_df = pd.DataFrame(
+        {
+            "법령명": ["개인정보보호법", "개인정보보호법", "은행법"],
+            "공포일자": ["2023.01.01.", "2024.06.15.", "2022.03.01."],
+        }
+    )
+    reg_df = pd.DataFrame(
+        {
+            "행정규칙명": ["개인정보보호법", "자금세탁방지및공중협박자금조달금지에관한업무규정"],
+            "발령일자": ["2099.01.01.", "2021.05.05."],  # 은행/개인정보는 law에서 이미 찾았으니 무시돼야 함
+        }
+    )
+
+    def fake_crawl_listing(browser, site_category, *args, **kwargs):
+        return law_df if site_category == "law" else reg_df
+
+    monkeypatch.setattr(law_go_kr, "crawl_listing", fake_crawl_listing)
+
+    result = law_go_kr._watchlist_date_lookup(
+        MagicMock(), ["개인정보보호법", "은행법", "자금세탁방지및공중협박자금조달금지에관한업무규정", "존재하지않는법"]
+    )
+
+    assert result["개인정보보호법"] == "2024-06-15"  # law의 최신 날짜, reg 값(2099)은 안 씀
+    assert result["은행법"] == "2022-03-01"
+    assert result["자금세탁방지및공중협박자금조달금지에관한업무규정"] == "2021-05-05"  # law엔 없고 reg에만 있음
+    assert "존재하지않는법" not in result
+
+
+def test_crawl_watchlist_items_incremental_first_run_crawls_everything_and_saves_state(monkeypatch, tmp_path):
+    names = ["개인정보보호법", "은행법"]
+    monkeypatch.setattr(law_go_kr, "_watchlist_date_lookup", lambda browser, names: {
+        "개인정보보호법": "2024-01-01", "은행법": "2024-02-02"
+    })
+    item_by_name = {
+        "개인정보보호법": [{"id": "priv-1"}],
+        "은행법": [{"id": "bank-1"}],
+    }
+    browser = MagicMock()
+
+    def fake_open_or_reg(b, name):
+        browser.current_url = name
+        return "law"
+
+    monkeypatch.setattr(law_go_kr, "open_law_or_reg_detail_by_name", fake_open_or_reg)
+    monkeypatch.setattr(law_go_kr, "get_body_content_html", lambda b: "<html></html>")
+    monkeypatch.setattr(law_go_kr, "parse_law_body_html", lambda html: {"effective_date": "2024-01-01"})
+    monkeypatch.setattr(law_go_kr, "law_detail_to_items", lambda meta, source_url="": item_by_name[source_url])
+
+    state_path = tmp_path / "law_crawl_state.json"
+    items = crawl_watchlist_items_incremental(browser=browser, names=names, state_path=state_path)
+
+    assert items == [{"id": "priv-1"}, {"id": "bank-1"}]
+    assert state_path.exists()
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["개인정보보호법"] == {"date": "2024-01-01", "items": [{"id": "priv-1"}]}
+    assert saved["은행법"] == {"date": "2024-02-02", "items": [{"id": "bank-1"}]}
+
+
+def test_crawl_watchlist_items_incremental_reuses_cache_when_date_unchanged(monkeypatch, tmp_path):
+    state_path = tmp_path / "law_crawl_state.json"
+    state_path.write_text(
+        json.dumps({"개인정보보호법": {"date": "2024-01-01", "items": [{"id": "priv-1"}]}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(law_go_kr, "_watchlist_date_lookup", lambda browser, names: {"개인정보보호법": "2024-01-01"})
+
+    detail_crawl_calls = []
+    monkeypatch.setattr(
+        law_go_kr, "open_law_or_reg_detail_by_name", lambda b, name: detail_crawl_calls.append(name)
+    )
+
+    items = crawl_watchlist_items_incremental(
+        browser=MagicMock(), names=["개인정보보호법"], state_path=state_path
+    )
+
+    assert items == [{"id": "priv-1"}]
+    assert detail_crawl_calls == []  # 날짜가 같으니 상세 페이지를 다시 열지 않아야 함
+
+
+def test_crawl_watchlist_items_incremental_recrawls_when_date_changed(monkeypatch, tmp_path):
+    state_path = tmp_path / "law_crawl_state.json"
+    state_path.write_text(
+        json.dumps({"개인정보보호법": {"date": "2024-01-01", "items": [{"id": "priv-old"}]}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(law_go_kr, "_watchlist_date_lookup", lambda browser, names: {"개인정보보호법": "2024-05-05"})
+    monkeypatch.setattr(law_go_kr, "open_law_or_reg_detail_by_name", lambda b, name: "law")
+    monkeypatch.setattr(law_go_kr, "get_body_content_html", lambda b: "<html></html>")
+    monkeypatch.setattr(law_go_kr, "parse_law_body_html", lambda html: {"effective_date": "2024-05-05"})
+    monkeypatch.setattr(law_go_kr, "law_detail_to_items", lambda meta, source_url="": [{"id": "priv-new"}])
+
+    items = crawl_watchlist_items_incremental(
+        browser=MagicMock(), names=["개인정보보호법"], state_path=state_path
+    )
+
+    assert items == [{"id": "priv-new"}]
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["개인정보보호법"] == {"date": "2024-05-05", "items": [{"id": "priv-new"}]}
+
+
+def test_crawl_watchlist_items_incremental_falls_back_to_cache_on_detail_crawl_failure(monkeypatch, tmp_path):
+    state_path = tmp_path / "law_crawl_state.json"
+    state_path.write_text(
+        json.dumps({"개인정보보호법": {"date": "2024-01-01", "items": [{"id": "priv-cached"}]}}), encoding="utf-8"
+    )
+    # 날짜가 바뀌어서 재크롤링을 시도하지만 실패하는 상황
+    monkeypatch.setattr(law_go_kr, "_watchlist_date_lookup", lambda browser, names: {"개인정보보호법": "2024-05-05"})
+
+    def fail(b, name):
+        raise RuntimeError("사이트 접속 실패")
+
+    monkeypatch.setattr(law_go_kr, "open_law_or_reg_detail_by_name", fail)
+
+    items = crawl_watchlist_items_incremental(
+        browser=MagicMock(), names=["개인정보보호법"], state_path=state_path
+    )
+
+    assert items == [{"id": "priv-cached"}]  # 실패해도 지난 결과를 잃지 않아야 함
+
+
+def test_crawl_watchlist_items_incremental_drops_item_when_no_cache_and_crawl_fails(monkeypatch, tmp_path):
+    state_path = tmp_path / "law_crawl_state.json"  # 상태 파일 없음(첫 실행) + 크롤링 실패
+    monkeypatch.setattr(law_go_kr, "_watchlist_date_lookup", lambda browser, names: {})
+
+    def fail(b, name):
+        raise RuntimeError("찾을 수 없음")
+
+    monkeypatch.setattr(law_go_kr, "open_law_or_reg_detail_by_name", fail)
+
+    items = crawl_watchlist_items_incremental(
+        browser=MagicMock(), names=["존재하지않는법"], state_path=state_path
+    )
+
+    assert items == []
