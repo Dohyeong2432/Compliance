@@ -36,17 +36,30 @@ Selenium이 Chrome을 직접 실행하므로 로컬 PC(또는 Chrome이 설치�
     `lsOldAndNew`/연혁 페이지 HTML을 추가로 공유해주세요.
   - **제정·개정이유**(`lsRvsDocInfoR`)는 아직 별도 파싱 대상이 아닙니다 —
     본문 페이지의 `[전문개정 YYYY.MM.DD.]` 같은 각주 수준으로만 딸려 옵니다.
-- **목록 → 본문 페이지 이동**: `fetch_law_body_html()`을 만들어뒀지만
-  **미검증**입니다 — `crawl_listing()`이 캡처한 `__href`/`__onclick`이 실제로
-  상세 페이지로 이어지는지, `#bdyBtnKO`를 눌러야 본문이 뜨는지는 실제 사이트
-  에서 한 번 돌려봐야 확정됩니다. `crawl_law_items()`가 이걸 엮어서
-  `LAW_CRAWLER` 진입점 역할을 하지만, 처음에는 `from_date`로 소량만 시도해
-  보길 권합니다.
+- **목록 → 본문 페이지 이동**: 실제 사용 중이라고 확인해주신 참고 코드
+  (`click_law_row`)를 그대로 옮겨서 구현했습니다 — href/onclick을 저장했다가
+  재생하는 게 아니라, "번호" 컬럼으로 그 행을 목록 페이지에서 다시 찾아 안의
+  `<a>`를 살아있는 DOM에서 바로 클릭하는 방식입니다.
+  - `click_row_by_number(browser, row_number)` — 현재 페이지에서 그 행을
+    찾아 클릭 (mock 기반 단위 테스트로 검증됨, `tests/test_law_go_kr_crawler.py`).
+  - `wait_for_detail_page(browser, expected_name)` — `<h2>` 텍스트가
+    `expected_name`으로 시작할 때까지 대기. 참고 코드는 정확히 일치(`==`)를
+    봤는데, 실제 본문 페이지의 `<h2>`는 "법령명 ( 약칭: ... )"처럼 약칭이
+    붙어 나온다는 걸 이번에 받은 실제 HTML로 확인해서, 약칭이 있어도 걸리지
+    않도록 접두어 일치로 고쳤습니다.
+  - `open_law_detail_by_name(browser, site_category, law_name)` — 이름을
+    아는 법령 하나를 목록에서 찾아 여는, 참고 코드와 가장 가까운 진입점.
+  - `crawl_law_items()` — 목록의 모든 행을 순서대로 열었다가 같은 페이지로
+    돌아와 다음 행을 여는 전체 수집 루프. `click_row_by_number`/
+    `wait_for_detail_page` 자체는 검증된 로직이지만, 이 "전부 순회" 반복은
+    참고 코드에 없던 확장이라 아직 실제 사이트에서 통짜로 돌려보지는
+    못했습니다 — 처음엔 `crawl_law_items(from_date=...)`로 범위를 좁히거나,
+    이름 하나로 `fetch_law_item_by_name()`을 먼저 확인해보길 권합니다.
 
 ## 더 다듬고 싶다면
 
-1. `fetch_law_body_html()`을 실제로 한 번 돌려서 결과를 알려주시면(성공/실패,
-   어느 지점에서 막히는지) 이어서 고치겠습니다.
+1. `crawl_law_items()`나 `fetch_law_item_by_name()`을 실제로 한 번 돌려서
+   결과를 알려주시면(성공/실패, 어느 지점에서 막히는지) 이어서 고치겠습니다.
 2. 과거 개정 이력 간 비교(연혁/신구법비교 페이지)가 필요하면 그 페이지의
    HTML을 공유해주세요.
 3. **law.go.kr Open API 사용(대안)**: [open.law.go.kr](https://open.law.go.kr)에서

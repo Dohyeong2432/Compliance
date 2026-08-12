@@ -1,33 +1,35 @@
 """law.go.kr(국가법령정보센터) 법령/행정규칙 크롤러.
 
-원본은 업로드해주신 Selenium 기반 목록 크롤링 코드(법령_개정안_안내/py_files/
-common_functions.py, table_update.py 중 "사이트 크롤링" 부분)입니다. 이 파일은
-그걸 다음 기준으로 정리한 것입니다:
-  - 메일 발송/hwp 다운로드 등 이후 처리 로직 제거 (원본 주석에 이미 표시됨)
-  - get_updated_table()/get_total_table_info()의 90% 중복 코드를 crawl_listing()
-    하나로 통합 (증분 수집은 stop_before로, 최초 전체 수집은 stop_before=None으로)
-  - "이전 테이블과 동일하면 무한 재시도"였던 대기 루프에 재시도 횟수 상한을 둠
-    (원본은 크롤링 랙이 영구적이면 그대로 무한 루프에 빠짐)
-  - xlsx/parquet 저장을 함수 밖으로 분리 -- crawl_law_items()는 매 SYNC_INTERVAL_
-    SECONDS마다 자동 호출될 수 있으므로, 파일 저장 같은 부수효과를 안에 두면 안 됨
-  - 목록 각 행에서 상세 페이지로 가는 <a href>/onclick을 원문 그대로 추가 수집
-    (원본은 법령명/공포일자 텍스트만 뽑고 상세 페이지로 갈 방법을 아예 남기지
-    않아서, 본문을 이어서 가져올 수가 없었음)
+세 벌의 참고 코드를 이 한 파일로 정리했습니다:
+  - common_functions.py / table_update.py: 목록(법령명/공포일자) 크롤링.
+    get_updated_table()/get_total_table_info()의 90% 중복 코드를
+    crawl_listing() 하나로 통합했고(증분은 stop_before로, 전체는 None으로),
+    "이전 테이블과 동일하면 무한 재시도"였던 대기 루프에 재시도 상한을 둔
+    것 정도만 다릅니다(원본은 랙이 영구적이면 무한 루프).
+  - get_information.py의 click_law_row(): 목록 -> 본문 페이지 이동. href/
+    onclick을 저장해뒀다가 재생하는 게 아니라, "번호" 컬럼으로 그 행을 다시
+    찾아 안의 <a>를 살아있는 DOM에서 바로 클릭하는 방식이라는 걸 이 코드로
+    확인했습니다 -- click_row_by_number/wait_for_detail_page/
+    open_law_detail_by_name이 이걸 그대로 옮긴 것입니다.
+  - 메일 발송/hwp 다운로드/xlwings 엑셀 연동 등 이후 처리 로직은 가져오지
+    않았습니다(이 프로젝트의 RAG 파이프라인과 무관).
 
-## 아직 못 채운 부분 (본문/제개정사항/신구조문대비표)
+## 본문 파싱
 
-목록(법령명/공포일자) 수집은 원본 코드가 검증된 그대로라 정리만 했지만, 본문·
-제개정사항·신구조문대비표는 상세 페이지의 실제 HTML 구조를 봐야 정확한 선택자를
-쓸 수 있어서 비워뒀습니다(fetch_law_detail 참고). 준법감시 데이터에서 셀렉터를
-잘못 짚으면 "조용히 빈 본문/엉뚱한 본문이 색인되는" 실패가 나는데, 이건 이
-프로젝트 전체가 막으려는 실패 모드라 추측으로 채우지 않았습니다. 아래 중 하나를
-공유해주시면 이어서 구현합니다:
-  1. 법령 본문 조회 페이지, 행정규칙 본문 조회 페이지, 신구조문대비표 페이지의
-     HTML(뷰 소스) -- 이 파일의 스크래핑 방식을 그대로 유지하고 싶다면.
-  2. law.go.kr Open API(open.law.go.kr) OC 인증키 -- 있다면 스크래핑보다 이 쪽이
-     훨씬 안정적입니다. lawService.do가 조문 본문을 XML로 바로 주고, 신구조문
-     대비 정보도 API로 제공되는 걸로 알고 있어서(정확한 엔드포인트는 발급받은
-     문서로 재확인 필요), Selenium 없이 requests만으로 끝낼 수 있습니다.
+parse_law_body_html()은 참고 코드에는 없던 부분으로, 공유받은 실제 "본문"
+버튼 결과 HTML을 직접 분석해 작성했습니다. 시행 예정 개정이 걸린 법령은
+조문마다 현행 텍스트와 시행예정 텍스트가 함께 나온다는 걸 발견해, 이를
+SUPERSEDES 관계로 자동 연결합니다 (tests/test_law_go_kr_crawler.py,
+tests/fixtures/law_go_kr_body.html 참고).
+
+## 아직 실제 사이트에서 못 돌려본 부분
+
+click_row_by_number/wait_for_detail_page 자체는 참고 코드에서 검증된
+로직을 그대로 옮긴 것이라 신뢰도가 높지만, crawl_law_items()가 "목록 페이지의
+모든 행을 순서대로 열었다가 같은 페이지로 돌아와 다음 행을 여는" 반복은 참고
+코드에 없던 확장이라(참고 코드는 이름을 아는 법령 하나를 찾아 여는 용도) 아직
+미검증입니다. 이름을 아는 법령 하나로 먼저 확인하고 싶으면
+fetch_law_item_by_name()을 직접 호출하세요.
 
 pipeline.connectors.law.LawConnector(fetch_items=...)에 연결하려면:
     LAW_CRAWLER=crawlers.law_go_kr:crawl_law_items
@@ -134,9 +136,13 @@ def click_next_page(browser: webdriver.Chrome) -> None:
 
 
 def _parse_listing_table(page_source: bs) -> pd.DataFrame:
-    """목록 테이블 한 페이지를 파싱. 텍스트뿐 아니라, 각 셀 안에 <a>가 있으면
-    그 href/onclick도 "<컬럼명>__href" / "<컬럼명>__onclick"으로 원문 그대로
-    함께 담는다 -- 상세 페이지로 가는 유일한 단서라 텍스트만 뽑으면 버려진다."""
+    """목록 테이블 한 페이지를 텍스트로 파싱 (원본 get_page_table_info와 동일).
+
+    상세 페이지로 넘어가는 데는 href/onclick이 필요 없다는 게 확인됐다 --
+    실제로 동작하는 참고 코드(click_law_row)는 "번호" 컬럼 값으로 그 행을
+    다시 찾아 안의 <a>를 살아있는 DOM에서 직접 클릭한다. 그래서 "번호"
+    컬럼은 (다른 곳과 달리) 여기서 버리지 않는다 -- click_row_by_number가
+    쓴다."""
     table_tag = page_source.find("table")
     if table_tag is None:
         return pd.DataFrame()
@@ -153,12 +159,6 @@ def _parse_listing_table(page_source: bs) -> pd.DataFrame:
             text = td.text.strip()
             if text:
                 row[col_name] = text
-            anchor = td.find("a")
-            if anchor is not None:
-                if anchor.get("href"):
-                    row[f"{col_name}__href"] = anchor["href"]
-                if anchor.get("onclick"):
-                    row[f"{col_name}__onclick"] = anchor["onclick"]
         if row:
             rows.append(row)
     return pd.DataFrame(rows)
@@ -403,59 +403,151 @@ def law_detail_to_items(meta: dict[str, Any], source_url: str = "") -> list[dict
 
 
 # ---------------------------------------------------------------------------
-# 목록 -> 상세 페이지 이동 (미검증)
+# 목록 -> 본문 페이지 이동
+#
+# 실제로 동작 중인 참고 코드(get_information.py의 click_law_row)를 그대로
+# 옮긴 것. 핵심은 href/onclick을 저장해뒀다가 나중에 재생하는 게 아니라,
+# 목록 페이지에 "번호" 컬럼으로 그 행을 다시 찾아 그 안의 <a>를 살아있는
+# DOM에서 바로 클릭하는 것 -- law.go.kr의 "번호"는 그 페이지 안에서만
+# 유효한 순번이라, 반드시 그 행이 보이는 페이지를 이미 띄운 상태에서
+# 호출해야 한다(다른 페이지로 이동한 뒤에는 재사용 불가).
 # ---------------------------------------------------------------------------
 
-def fetch_law_body_html(browser: webdriver.Chrome, listing_row: dict[str, Any]) -> str:
-    """listing_row(crawl_listing()이 반환한 한 행, "법령명__href"/"법령명__onclick"
-    포함)로 상세 페이지에 접근해 "본문" 버튼까지 눌러 #bodyContent가 채워진
-    뒤의 outerHTML을 반환.
+def click_row_by_number(browser: webdriver.Chrome, row_number: int) -> None:
+    """현재 목록 페이지에서 "번호" 컬럼 값이 row_number인 행을 찾아, 그 행의
+    두 번째 셀(법령명/행정규칙명 컬럼)에 있는 링크를 클릭한다."""
+    for tr in browser.find_elements(By.TAG_NAME, "tr"):
+        cells = tr.find_elements(By.TAG_NAME, "td")
+        if cells and cells[0].text.strip() == str(row_number):
+            cells[1].find_element(By.TAG_NAME, "a").click()
+            return
+    raise RuntimeError(f"번호 {row_number}에 해당하는 행을 현재 페이지에서 찾을 수 없습니다")
 
-    주의: parse_law_body_html()과 달리 이 함수는 실제 사이트에서 실행해
-    검증하지 못했습니다 -- __onclick/__href 값이 실제로 어떻게 상세 페이지로
-    이어지는지, "본문" 버튼(#bdyBtnKO)을 눌러야 하는지 아니면 목록 클릭만으로
-    이미 본문이 뜨는지는 crawl_listing() 결과를 직접 실행해봐야 확정됩니다.
-    """
-    href = listing_row.get("법령명__href") or listing_row.get("행정규칙명__href")
-    onclick = listing_row.get("법령명__onclick") or listing_row.get("행정규칙명__onclick")
 
-    if href:
-        base = browser.current_url.split("?")[0].rsplit("/", 1)[0]
-        browser.get(href if href.startswith("http") else f"{base}/{href.lstrip('/')}")
-    elif onclick:
-        browser.execute_script(onclick.removesuffix("return false;"))
-    else:
-        raise ValueError("listing_row에 상세 페이지로 갈 href/onclick이 없습니다")
+def wait_for_detail_page(browser: webdriver.Chrome, expected_name: str, timeout: int = 15) -> None:
+    """상세 페이지 로드 대기: <h2> 텍스트(한글만 남기고 비교)가 expected_name으로
+    시작할 때까지 폴링. 원본은 이 대기에 상한이 없어 페이지가 영영 안 뜨면
+    무한 루프에 빠졌다 -- WebDriverWait로 시간 제한을 둔 것 외에 한 가지를 더
+    고쳤다: 원본은 정확히 일치(==)를 봤는데, 실제 본문 페이지의 <h2>는
+    "법령명 ( 약칭: ... )"처럼 약칭이 뒤에 붙어서 온다는 걸 이번에 받은 실제
+    HTML로 확인했다 -- 약칭이 있는 법령은 원본 방식대로면 절대 매치가 안 되어
+    무한 대기에 빠졌을 것이다. 그래서 정확히 일치 대신 "약칭이 뒤에 붙어도
+    괜찮도록" 접두어 일치로 바꿨다."""
+    normalized_expected = re.sub(r"[^가-힣]", "", expected_name).strip()
 
-    WebDriverWait(browser, 10).until(
-        lambda b: b.execute_script("return document.readyState") == "complete"
-    )
-    try:
-        browser.find_element(By.ID, "bdyBtnKO").click()
-    except Exception:
-        pass  # 이미 본문이 기본 표시되는 화면일 수 있음
+    def _loaded(b: webdriver.Chrome) -> bool:
+        return any(
+            re.sub(r"[^가-힣]", "", h2.text).strip().startswith(normalized_expected)
+            for h2 in b.find_elements(By.TAG_NAME, "h2")
+        )
 
-    WebDriverWait(browser, 10).until(
-        lambda b: len(b.find_elements(By.CSS_SELECTOR, "#bodyContent .pgroup")) > 0
-    )
+    WebDriverWait(browser, timeout).until(_loaded)
+
+
+def get_body_content_html(browser: webdriver.Chrome) -> str:
     return browser.find_element(By.ID, "bodyContentTOP").get_attribute("outerHTML")
+
+
+def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_name: str) -> None:
+    """law_name(한글만 비교)과 일치하는 항목을 목록에서 찾아 상세(본문) 페이지를
+    연다. 참고 코드가 실제로 쓰는 방식과 동일하게 페이지를 넘기며 찾다가,
+    찾은 바로 그 페이지에서 클릭까지 이어서 한다. 동명이인이 있으면(제목이
+    같은 옛 버전 등) 번호가 가장 큰(=가장 최근) 행을 선택한다."""
+    normalized_target = re.sub(r"[^가-힣]", "", law_name).strip()
+    name_col, date_col = get_column_name(site_category)
+    move_to_home(browser, site_category)
+    time.sleep(0.5)
+
+    last_page_number = get_last_page_number(browser, site_category) or 1
+    prev_names: pd.Series | None = None
+
+    for range_start, range_end in get_page_range(last_page_number):
+        for page in range(range_start, range_end + 1):
+            _goto_page_with_retry(browser, page)
+            time.sleep(0.5)
+
+            table_df = _wait_for_fresh_table(browser, prev_names, page, name_col)
+            if not table_df.empty and name_col in table_df:
+                normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
+                matches = table_df[normalized_col == normalized_target]
+                if not matches.empty:
+                    row_number = int(matches["번호"].astype(int).max())
+                    click_row_by_number(browser, row_number)
+                    wait_for_detail_page(browser, law_name)
+                    time.sleep(0.5)
+                    return
+                prev_names = table_df[name_col]
+
+        if range_end == last_page_number:
+            break
+        click_next_page(browser)
+        time.sleep(0.5)
+
+    raise RuntimeError(f"'{law_name}'을(를) 목록에서 찾지 못했습니다")
+
+
+def fetch_law_item_by_name(browser: webdriver.Chrome, site_category: str, law_name: str) -> list[dict[str, Any]]:
+    """law_name으로 목록에서 찾아 열고, 본문을 파싱해 LawConnector가 기대하는
+    list[dict]로 변환. open_law_detail_by_name()/parse_law_body_html()/
+    law_detail_to_items()를 엮은 것 -- 처음 검증해볼 때 쓰기 좋은, 법령
+    하나짜리 진입점."""
+    open_law_detail_by_name(browser, site_category, law_name)
+    html = get_body_content_html(browser)
+    meta = parse_law_body_html(html)
+    return law_detail_to_items(meta, source_url=browser.current_url)
 
 
 def crawl_law_items(browser: webdriver.Chrome | None = None, from_date: date | None = None) -> list[dict[str, Any]]:
     """LAW_CRAWLER=crawlers.law_go_kr:crawl_law_items 로 연결되는 진입점.
 
-    browser를 넘기지 않으면 새로 띄우고 끝에 닫습니다. fetch_law_body_html()이
-    아직 미검증이므로, 처음 시도할 때는 소량(예: from_date로 최근 며칠)으로
-    먼저 결과를 확인해보는 걸 권장합니다.
+    click_row_by_number/wait_for_detail_page는 참고 코드에서 검증된 대로
+    포팅한 것이지만, 목록 페이지의 "모든" 행을 순서대로 열었다가 같은
+    페이지로 돌아와 다음 행을 여는 이 반복 자체는 참고 코드에 없던
+    확장이라 미검증입니다(참고 코드는 이름을 알고 있는 법령 하나를 찾아
+    여는 용도였습니다 -- 그 흐름만 쓰고 싶다면 fetch_law_item_by_name을
+    직접 호출하세요). 처음 돌릴 때는 from_date로 범위를 좁혀 확인해보길
+    권합니다.
     """
     owns_browser = browser is None
     browser = browser or get_browser()
     try:
+        name_col, date_col = get_column_name("law")
+        move_to_home(browser, "law")
+        time.sleep(0.5)
+        last_page_number = get_last_page_number(browser, "law") or 1
+
         items: list[dict[str, Any]] = []
-        for _, row in crawl_listing(browser, "law", stop_before=from_date).iterrows():
-            html = fetch_law_body_html(browser, row.to_dict())
-            meta = parse_law_body_html(html)
-            items.extend(law_detail_to_items(meta, source_url=browser.current_url))
+        prev_names: pd.Series | None = None
+
+        for range_start, range_end in get_page_range(last_page_number):
+            for page in range(range_start, range_end + 1):
+                _goto_page_with_retry(browser, page)
+                time.sleep(0.5)
+
+                table_df = _wait_for_fresh_table(browser, prev_names, page, name_col)
+                if table_df.empty or date_col not in table_df:
+                    continue
+
+                dates = pd.to_datetime(table_df[date_col], errors="coerce")
+                if from_date is not None and pd.notna(dates.max()) and dates.max().date() < from_date:
+                    return items
+
+                for row_number, law_name in zip(table_df["번호"], table_df[name_col]):
+                    click_row_by_number(browser, int(row_number))
+                    wait_for_detail_page(browser, law_name)
+                    html = get_body_content_html(browser)
+                    items.extend(law_detail_to_items(parse_law_body_html(html), source_url=browser.current_url))
+                    # 같은 목록 페이지로 복귀해 다음 행을 이어서 연다.
+                    _goto_page_with_retry(browser, page)
+                    time.sleep(0.5)
+
+                prev_names = table_df[name_col]
+
+            if range_end == last_page_number:
+                break
+            click_next_page(browser)
+            time.sleep(0.5)
+
         return items
     finally:
         if owns_browser:

@@ -1,6 +1,15 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
-from crawlers.law_go_kr import law_detail_to_items, parse_law_body_html
+import pytest
+from selenium.common.exceptions import TimeoutException
+
+from crawlers.law_go_kr import (
+    click_row_by_number,
+    law_detail_to_items,
+    parse_law_body_html,
+    wait_for_detail_page,
+)
 from ontology.schema import RelationType
 
 FIXTURE = Path(__file__).parent / "fixtures" / "law_go_kr_body.html"
@@ -117,3 +126,71 @@ def test_law_detail_to_items_feeds_law_connector_end_to_end():
     assert len(docs) == len(items)
     upcoming_j1 = next(d for d in docs if d.external_id == "011359-1-0@2026-10-01")
     assert upcoming_j1.relations == [(RelationType.SUPERSEDES, "law:011359-1-0@2026-08-04")]
+
+
+# ---------------------------------------------------------------------------
+# click_row_by_number / wait_for_detail_page: 실제 Selenium/브라우저 없이,
+# 참고 코드(click_law_row)에서 그대로 옮겨온 핵심 로직 자체를 검증한다.
+# ---------------------------------------------------------------------------
+
+def _make_tr(number_text: str):
+    number_td = MagicMock()
+    number_td.text = number_text
+    name_td = MagicMock()
+    link = MagicMock()
+    name_td.find_element.return_value = link
+    tr = MagicMock()
+    tr.find_elements.return_value = [number_td, name_td]
+    return tr, link
+
+
+def test_click_row_by_number_clicks_the_matching_row_link():
+    browser = MagicMock()
+    tr1, link1 = _make_tr("1")
+    tr2, link2 = _make_tr("2")
+    browser.find_elements.return_value = [tr1, tr2]
+
+    click_row_by_number(browser, 2)
+
+    link1.click.assert_not_called()
+    link2.click.assert_called_once()
+
+
+def test_click_row_by_number_ignores_rows_without_cells():
+    empty_tr = MagicMock()
+    empty_tr.find_elements.return_value = []
+    tr1, link1 = _make_tr("1")
+    browser = MagicMock()
+    browser.find_elements.return_value = [empty_tr, tr1]
+
+    click_row_by_number(browser, 1)
+
+    link1.click.assert_called_once()
+
+
+def test_click_row_by_number_raises_when_not_found():
+    browser = MagicMock()
+    tr1, _ = _make_tr("1")
+    browser.find_elements.return_value = [tr1]
+
+    with pytest.raises(RuntimeError):
+        click_row_by_number(browser, 99)
+
+
+def test_wait_for_detail_page_succeeds_when_h2_matches_ignoring_non_korean_chars():
+    browser = MagicMock()
+    h2 = MagicMock()
+    h2.text = "전기통신금융사기 피해 방지 및 피해금 환급에 관한 특별법(제21320호)"
+    browser.find_elements.return_value = [h2]
+
+    wait_for_detail_page(browser, "전기통신금융사기 피해 방지 및 피해금 환급에 관한 특별법", timeout=1)
+
+
+def test_wait_for_detail_page_times_out_without_match():
+    browser = MagicMock()
+    h2 = MagicMock()
+    h2.text = "다른 법령명"
+    browser.find_elements.return_value = [h2]
+
+    with pytest.raises(TimeoutException):
+        wait_for_detail_page(browser, "찾는 법령명", timeout=1)
