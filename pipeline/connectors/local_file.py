@@ -69,10 +69,15 @@ def _extract_text(path: Path) -> str:
     return result.stdout
 
 
+_DECORATIVE_LINE = re.compile(r"^[\s\-=_*~+#]+$")
+
+
 def _parse_title(text: str) -> str:
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped:
+        # pandoc renders table/box borders as bare punctuation lines
+        # (e.g. "-----"); skip those to find the real first heading.
+        if stripped and not _DECORATIVE_LINE.match(stripped):
             return stripped
     return "제목 없음"
 

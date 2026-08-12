@@ -21,6 +21,11 @@ def test_parse_title_empty_text_returns_placeholder():
     assert _parse_title("   \n\n  ") == "제목 없음"
 
 
+def test_parse_title_skips_decorative_border_lines():
+    text = "  -----------------------------\n  윤리강령행동지침 국문본\n  -----------------------------"
+    assert _parse_title(text) == "윤리강령행동지침 국문본"
+
+
 def test_parse_latest_effective_date_picks_most_recent_revision():
     text = "전문제정 2011.1.10\n개정 2017.09.25\n개정 2022.10.26\n개정 2018.09.07"
     assert _parse_latest_effective_date(text) == date(2022, 10, 26)
