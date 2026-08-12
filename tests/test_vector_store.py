@@ -77,6 +77,20 @@ def test_search_respects_top_k(vector_store):
     assert len(results) <= 3
 
 
+def test_delete_removes_record_from_search_results(vector_store):
+    q = EMB.embed_one("삭제 대상 문서 테스트")
+    vector_store.upsert([VectorRecord("doc1", EMB.embed_one("삭제 대상 문서 테스트"), "text")])
+    assert "doc1" in {m.entity_id for m in vector_store.search(q, top_k=5, dept="ANY")}
+
+    vector_store.delete("doc1")
+
+    assert "doc1" not in {m.entity_id for m in vector_store.search(q, top_k=5, dept="ANY")}
+
+
+def test_delete_missing_id_is_a_noop(vector_store):
+    vector_store.delete("nope")  # must not raise
+
+
 def test_upsert_overwrites_existing_record(vector_store):
     vector_store.upsert([VectorRecord("doc1", EMB.embed_one("첫 버전 텍스트"), "text", allowed_depts=("IB",))])
     vector_store.upsert([VectorRecord("doc1", EMB.embed_one("두번째 버전 텍스트"), "text", allowed_depts=("ALL",))])

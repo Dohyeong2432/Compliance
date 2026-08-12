@@ -1,0 +1,142 @@
+import json
+from pathlib import Path
+
+from knowledge.embedder import HashEmbedder
+from knowledge.graph_store import NetworkXGraphStore
+from knowledge.vector_store import InMemoryVectorStore
+from ontology.schema import EntityType
+from pipeline.connectors.base import RawDocument, SourceConnector
+from pipeline.ingest import IngestPipeline
+from pipeline.sync import IngestSyncer
+
+
+class FakeConnector(SourceConnector):
+    """Test double whose fetch() result can be changed between calls, to
+    simulate a source that has been edited/removed on disk or upstream."""
+
+    entity_type = EntityType.LAW
+
+    def __init__(self, documents: list[RawDocument]):
+        self.documents = documents
+        self.errors: list[tuple[str, str]] = []
+
+    def fetch(self) -> list[RawDocument]:
+        return self.documents
+
+
+class RaisingConnector(SourceConnector):
+    entity_type = EntityType.CASE
+
+    def fetch(self) -> list[RawDocument]:
+        raise RuntimeError("crawler is down")
+
+
+def _law_doc(external_id: str, title: str = "t") -> RawDocument:
+    return RawDocument(external_id=external_id, entity_type=EntityType.LAW, title=title, body="본문")
+
+
+def _make_syncer(connectors: dict[str, SourceConnector], state_path=None) -> tuple[IngestSyncer, NetworkXGraphStore, InMemoryVectorStore]:
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store)
+    syncer = IngestSyncer(pipeline, graph_store, vector_store, connectors, state_path=state_path)
+    return syncer, graph_store, vector_store
+
+
+def test_sync_once_ingests_documents():
+    connector = FakeConnector([_law_doc("1"), _law_doc("2")])
+    syncer, graph_store, _ = _make_syncer({"law": connector})
+
+    report = syncer.sync_once()
+
+    assert report.ok is True
+    assert report.results[0].ingested == 2
+    assert report.results[0].removed == 0
+    assert graph_store.has_entity("law:1")
+    assert graph_store.has_entity("law:2")
+
+
+def test_sync_once_is_idempotent_on_repeat_run():
+    connector = FakeConnector([_law_doc("1")])
+    syncer, graph_store, _ = _make_syncer({"law": connector})
+
+    syncer.sync_once()
+    report = syncer.sync_once()
+
+    assert report.results[0].ingested == 1
+    assert report.results[0].removed == 0
+    assert graph_store.has_entity("law:1")
+
+
+def test_sync_once_deletes_documents_that_disappeared():
+    connector = FakeConnector([_law_doc("1"), _law_doc("2")])
+    syncer, graph_store, vector_store = _make_syncer({"law": connector})
+    syncer.sync_once()
+    assert graph_store.has_entity("law:2")
+
+    connector.documents = [_law_doc("1")]  # "2" was removed from the source
+    report = syncer.sync_once()
+
+    assert report.results[0].removed == 1
+    assert graph_store.has_entity("law:1") is True
+    assert graph_store.has_entity("law:2") is False
+    assert vector_store.search(HashEmbedder().embed_one("t 본문"), top_k=10, dept="ANY")
+    assert "law:2" not in {
+        m.entity_id for m in vector_store.search(HashEmbedder().embed_one("t 본문"), top_k=10, dept="ANY")
+    }
+
+
+def test_sync_once_does_not_delete_on_first_run():
+    # An empty starting baseline must never be read as "everything was removed".
+    connector = FakeConnector([_law_doc("1")])
+    syncer, graph_store, _ = _make_syncer({"law": connector})
+
+    report = syncer.sync_once()
+
+    assert report.results[0].removed == 0
+    assert graph_store.has_entity("law:1")
+
+
+def test_one_connector_failing_does_not_block_others():
+    ok_connector = FakeConnector([_law_doc("1")])
+    syncer, graph_store, _ = _make_syncer({"law": ok_connector, "case": RaisingConnector()})
+
+    report = syncer.sync_once()
+
+    by_name = {r.name: r for r in report.results}
+    assert by_name["case"].ok is False
+    assert "crawler is down" in by_name["case"].errors[0]
+    assert by_name["law"].ok is True
+    assert graph_store.has_entity("law:1")
+    assert report.ok is False  # overall report reflects the failing source
+
+
+def test_connector_errors_attribute_is_surfaced_in_report():
+    connector = FakeConnector([_law_doc("1")])
+    connector.errors = [("bad-file.docx", "parse failed")]
+    syncer, _, _ = _make_syncer({"law": connector})
+
+    report = syncer.sync_once()
+
+    assert "bad-file.docx: parse failed" in report.results[0].errors
+
+
+def test_state_persists_across_syncer_instances(tmp_path):
+    state_path = tmp_path / "sync_state.json"
+    connector = FakeConnector([_law_doc("1"), _law_doc("2")])
+    syncer, graph_store, _ = _make_syncer({"law": connector}, state_path=state_path)
+    syncer.sync_once()
+    assert json.loads(state_path.read_text())["law"] == ["law:1", "law:2"]
+
+    # Simulate a process restart: a brand-new syncer instance, same state file,
+    # backed by a *different* (also fresh) graph/vector store -- but the
+    # connector's source now only has "1".
+    graph_store2 = NetworkXGraphStore()
+    vector_store2 = InMemoryVectorStore()
+    pipeline2 = IngestPipeline(HashEmbedder(), vector_store2, graph_store2)
+    connector.documents = [_law_doc("1")]
+    syncer2 = IngestSyncer(pipeline2, graph_store2, vector_store2, {"law": connector}, state_path=state_path)
+
+    report = syncer2.sync_once()
+
+    assert report.results[0].removed == 1  # restart still remembered "2" existed before

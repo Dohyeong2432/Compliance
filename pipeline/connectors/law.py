@@ -1,31 +1,39 @@
-"""국가법령정보센터(law.go.kr) Open API 연동 스텁.
+"""국가법령정보센터(law.go.kr) 등에서 실제 크롤링한 법령 데이터를 색인하는 커넥터.
 
-실 연동에 필요한 것:
-  - law.go.kr Open API 사용자 인증키(OC) 발급 (https://open.law.go.kr)
-  - 대상 법령 화이트리스트 (자본시장법, 금융소비자보호법, 특정금융정보법 등)
-  - 개정 이력 API(효력범위 등)로 신구법 SUPERSEDES 체인 자동 구성
+이 클래스는 크롤링 자체(HTTP 호출, XML/HTML 파싱, OC 인증키 처리 등)를 하지
+않는다 -- 그건 호출 측이 작성한 fetch_items 콜백의 책임이다. 여기서는 그
+콜백이 반환한 dict를 온톨로지(RawDocument/Relation)로 변환하는 것만 담당한다.
+dict 스키마는 pipeline/connectors/crawler_base.py 참고.
 
-documents가 주어지면(개발/테스트용) 해당 목록을 그대로 반환하고, 그렇지 않으면
-실 연동이 아직 구현되지 않았음을 명시적으로 알린다.
+item에 "supersedes": "law:<이전 버전 external_id>" (또는 그 리스트)를 채우면
+신법 -> 구법 SUPERSEDES 관계가 자동 생성되어 HybridRetriever의 시계열 판정에
+바로 반영된다.
+
+사용 예:
+    def crawl_law_items() -> list[dict]:
+        # law.go.kr Open API 호출 + XML 파싱은 여기서 직접 구현
+        ...
+
+    connector = LawConnector(fetch_items=crawl_law_items)
+    pipeline.ingest_connector(connector)
+
+documents=[...]를 넘기면(dev/test 전용) 크롤러 없이 고정된 RawDocument 목록을
+그대로 반환한다 -- seed_data/seed.py가 이 경로를 쓴다.
 """
 
 from __future__ import annotations
 
-from ontology.schema import EntityType
-from pipeline.connectors.base import RawDocument, SourceConnector
+from typing import Any
+
+from ontology.schema import EntityType, RelationType
+from pipeline.connectors.crawler_base import CrawledSourceConnector
 
 
-class LawConnector(SourceConnector):
+class LawConnector(CrawledSourceConnector):
     entity_type = EntityType.LAW
 
-    def __init__(self, documents: list[RawDocument] | None = None, oc_key: str | None = None):
-        self._documents = documents
-        self.oc_key = oc_key
-
-    def fetch(self) -> list[RawDocument]:
-        if self._documents is not None:
-            return self._documents
-        raise NotImplementedError(
-            "LawConnector 실 연동 미구현: 국가법령정보센터 OC 인증키가 필요합니다. "
-            "https://open.law.go.kr 에서 발급 후 oc_key로 전달하세요."
-        )
+    def _convenience_relations(self, item: dict[str, Any]) -> list[tuple[RelationType, str]]:
+        targets = item.get("supersedes") or []
+        if isinstance(targets, str):
+            targets = [targets]
+        return [(RelationType.SUPERSEDES, target_id) for target_id in targets]

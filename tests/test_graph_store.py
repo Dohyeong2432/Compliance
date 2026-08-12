@@ -116,6 +116,31 @@ def test_expand_related_respects_limit_and_excludes_self(graph_store):
     assert all(e.id != "law:1" for e in related)
 
 
+def test_delete_entity_removes_it(graph_store):
+    graph_store.add_entity(_law("law:1"))
+    assert graph_store.has_entity("law:1") is True
+
+    graph_store.delete_entity("law:1")
+
+    assert graph_store.has_entity("law:1") is False
+    assert graph_store.get_entity("law:1") is None
+
+
+def test_delete_entity_missing_id_is_a_noop(graph_store):
+    graph_store.delete_entity("nope")  # must not raise
+    assert graph_store.has_entity("nope") is False
+
+
+def test_delete_entity_also_drops_its_relations(graph_store):
+    graph_store.add_entity(_law("case:1"))
+    graph_store.add_entity(_law("law:1"))
+    graph_store.add_relation(Relation("case:1", RelationType.VIOLATES, "law:1"))
+
+    graph_store.delete_entity("case:1")
+
+    assert graph_store.relations_to("law:1", RelationType.VIOLATES) == []
+
+
 def test_expand_related_defaults_exclude_supersedes(graph_store):
     graph_store.add_entity(_law("law:v1", date(2020, 1, 1), date(2022, 1, 1)))
     graph_store.add_entity(_law("law:v2", date(2022, 1, 1)))

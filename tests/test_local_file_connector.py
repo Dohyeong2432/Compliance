@@ -5,12 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from ontology.schema import ALL_DEPARTMENTS, EntityType
+from pipeline.connectors.faq import LocalFileFaqConnector
 from pipeline.connectors.local_file import (
+    LocalFileConnector,
     LocalFileRegulationConnector,
     _external_id_from_filename,
     _parse_latest_effective_date,
     _parse_title,
 )
+from pipeline.connectors.review import LocalFileReviewConnector
 
 
 def test_parse_title_takes_first_nonblank_line():
@@ -88,3 +92,50 @@ def test_fetch_ignores_unsupported_extensions(tmp_path):
 def test_fetch_empty_directory_returns_empty_list(tmp_path):
     connector = LocalFileRegulationConnector(str(tmp_path))
     assert connector.fetch() == []
+
+
+def test_fetch_nonexistent_directory_returns_empty_list_without_error(tmp_path):
+    connector = LocalFileRegulationConnector(str(tmp_path / "does-not-exist"))
+    assert connector.fetch() == []
+    assert connector.errors == []
+
+
+def test_root_level_file_uses_connector_default_allowed_depts(tmp_path, require_pandoc):
+    md = tmp_path / "source.md"
+    md.write_text("공개 검토서\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(tmp_path / "1. 공개 검토서.docx")], check=True)
+
+    connector = LocalFileConnector(str(tmp_path), EntityType.REVIEW, allowed_depts=("ALL",))
+    docs = connector.fetch()
+
+    assert len(docs) == 1
+    assert docs[0].allowed_depts == (ALL_DEPARTMENTS,)
+    assert docs[0].entity_type == EntityType.REVIEW
+
+
+def test_subfolder_name_becomes_allowed_depts(tmp_path, require_pandoc):
+    ib_dir = tmp_path / "IB"
+    ib_dir.mkdir()
+    md = tmp_path / "source.md"
+    md.write_text("IB 전용 검토서\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(ib_dir / "1. IB 검토서.docx")], check=True)
+
+    connector = LocalFileReviewConnector(str(tmp_path))  # default allowed_depts=ALL
+    docs = connector.fetch()
+
+    assert len(docs) == 1
+    assert docs[0].allowed_depts == ("IB",)
+    assert docs[0].entity_type == EntityType.REVIEW
+
+
+def test_local_file_faq_connector_reads_docx(tmp_path, require_pandoc):
+    md = tmp_path / "source.md"
+    md.write_text("고령투자자 기준이 뭔가요?\n\n65세 이상을 말합니다.", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(tmp_path / "1. FAQ.docx")], check=True)
+
+    connector = LocalFileFaqConnector(str(tmp_path))
+    docs = connector.fetch()
+
+    assert len(docs) == 1
+    assert docs[0].entity_type == EntityType.FAQ
+    assert "고령투자자" in docs[0].title

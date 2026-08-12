@@ -74,6 +74,13 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    def delete(self, entity_id: str) -> None:
+        """Remove a record. No-op if absent -- mirrors GraphStore.delete_entity
+        so periodic re-sync can drop both sides together when a source
+        document disappears."""
+        ...
+
+    @abstractmethod
     def search(
         self,
         query_vector: Vector,
@@ -92,6 +99,9 @@ class InMemoryVectorStore(VectorStore):
     def upsert(self, records: Sequence[VectorRecord]) -> None:
         for record in records:
             self._records[record.entity_id] = record
+
+    def delete(self, entity_id: str) -> None:
+        self._records.pop(entity_id, None)
 
     def search(
         self,
@@ -150,6 +160,9 @@ class ChromaVectorStore(VectorStore):
             documents=[r.text for r in records],
             metadatas=[self._to_metadata(r) for r in records],
         )
+
+    def delete(self, entity_id: str) -> None:
+        self._collection.delete(ids=[entity_id])
 
     def search(
         self,

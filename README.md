@@ -54,25 +54,79 @@ pipeline = IngestPipeline(components.embedder, components.vector_store, componen
 seed_all(pipeline)
 ```
 
-`data/raw/regulation/`에 올려둔 사규 원문(docx/doc/pdf)을 채우려면:
+## 문서 기반 소스: 사규 / 검토서 / FAQ
+
+세 소스 모두 실 시스템(EDMS/사내 위키) 연동 전까지 같은 방식으로 채웁니다 —
+docx/doc/pdf 원문을 아래 디렉터리에 그대로 올려두면 됩니다. `uvicorn api.main:app`으로
+서버를 띄우면 **시작 시 자동으로 색인되므로, 별도 스크립트를 수동으로 돌릴 필요는
+없습니다** (아래 "자동 재색인/동기화" 참고). 서버 없이 한 번만 색인하고 싶다면:
 
 ```python
 from bootstrap import build_components
 from pipeline.ingest import IngestPipeline
 from pipeline.connectors.local_file import LocalFileRegulationConnector
+from pipeline.connectors.review import LocalFileReviewConnector
+from pipeline.connectors.faq import LocalFileFaqConnector
 
 components = build_components()
 pipeline = IngestPipeline(components.embedder, components.vector_store, components.graph_store)
-connector = LocalFileRegulationConnector("data/raw/regulation")
-pipeline.ingest_connector(connector)
-print("실패:", connector.errors)  # DRM/손상 등으로 못 읽은 파일과 사유
+
+for connector in [
+    LocalFileRegulationConnector("data/raw/regulation"),
+    LocalFileReviewConnector("data/raw/review"),   # 부서 한정 문서는 하위 폴더로 구분 (data/raw/review/README.md)
+    LocalFileFaqConnector("data/raw/faq"),
+]:
+    pipeline.ingest_connector(connector)
+    print(connector.entity_type.value, "실패:", connector.errors)  # DRM/손상 등으로 못 읽은 파일과 사유
 ```
 
-`LocalFileRegulationConnector`는 실 EDMS 연동 전까지 쓰는 임시 로더이며, 시스템에
-다음 CLI 도구가 설치되어 있어야 합니다: `pandoc`(.docx), `catdoc`(.doc, 레거시
-CP949 인코딩), `pdftotext`(.pdf, poppler-utils 패키지). 확장자만 `.docx`인데
-실제로는 DRM 등으로 암호화된 파일은 파싱에 실패하며 `connector.errors`에 사유와
-함께 남고, 나머지 파일 처리는 막히지 않습니다.
+세 커넥터 모두 시스템에 다음 CLI 도구가 설치되어 있어야 합니다: `pandoc`(.docx),
+`catdoc`(.doc, 레거시 CP949 인코딩), `pdftotext`(.pdf, poppler-utils 패키지).
+확장자만 `.docx`인데 실제로는 DRM 등으로 암호화된 파일은 파싱에 실패하며
+`connector.errors`에 사유와 함께 남고, 나머지 파일 처리는 막히지 않습니다.
+
+## 크롤러 기반 소스: 법령 / 유권해석 / 제재사례
+
+law.go.kr Open API는 인증키가, 금융위/금감원 질의회신·제재정보는 공개 API 자체가
+없어 사이트별 크롤링이 필요합니다. 이 코드베이스는 그 크롤링(HTTP 호출, 파싱)을
+대신 해주지 않습니다 — `LawConnector` / `InterpretationConnector` / `CaseConnector`는
+`fetch_items`로 주입한 콜백(인자 없이 `list[dict]`를 반환)이 반환한 결과를
+`RawDocument`/관계로 변환하는 것만 담당합니다. dict 스키마는
+[`pipeline/connectors/crawler_base.py`](pipeline/connectors/crawler_base.py) 참고.
+
+```python
+def crawl_law_items() -> list[dict]:
+    ...  # law.go.kr Open API 호출 + XML 파싱은 직접 구현
+    return [{"id": "...", "title": "...", "body": "...", "effective_date": "2023-07-01",
+              "supersedes": "law:이전버전id"}]
+
+connector = LawConnector(fetch_items=crawl_law_items)
+```
+
+서버가 이 커넥터들을 자동으로 등록하게 하려면 `.env`에 `LAW_CRAWLER=my_pkg.mod:crawl_law_items`
+형태로 지정하세요(`INTERPRETATION_CRAWLER`, `CASE_CRAWLER`도 동일). 미설정 시 해당
+소스는 에러 없이 그냥 재색인 대상에서 빠집니다.
+
+## 자동 재색인/동기화
+
+`uvicorn api.main:app`으로 띄운 서버는:
+
+1. **시작 시** 등록된 모든 소스(사규/검토서/FAQ 로컬 디렉터리 + 설정된 크롤러)를
+   1회 전체 재색인합니다 — 빈 상태로 뜨지 않습니다.
+2. **`SYNC_INTERVAL_SECONDS`(기본 1800초)마다** 백그라운드에서 반복 재색인합니다.
+3. 파일 하나가 추가/삭제되어도 사람이 다시 스크립트를 돌릴 필요가 없습니다 —
+   `GraphStore.add_entity`/`VectorStore.upsert`는 id 기준 upsert라 수정분은 그냥
+   반영되고, 이전엔 있었는데 이번엔 사라진 id는 `pipeline/sync.py`의
+   `IngestSyncer`가 그래프·벡터 스토어 양쪽에서 명시적으로 삭제합니다(그래야
+   삭제된 사규가 계속 검색되는 사고를 막을 수 있습니다).
+4. 재시작 후에도 삭제 감지가 끊기지 않도록, 소스별로 마지막에 색인했던 id 목록을
+   `SYNC_STATE_PATH`(기본 `./data/sync_state.json`)에 저장해둡니다.
+
+다음 주기를 기다리지 않고 즉시 재색인하려면 (예: 사규 파일을 방금 업로드한 직후):
+
+```bash
+curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO JWT>"
+```
 
 ## 환경변수
 
@@ -89,12 +143,21 @@ CP949 인코딩), `pdftotext`(.pdf, poppler-utils 패키지). 확장자만 `.doc
 | `SSO_JWT_SECRET` | - | `HS256`일 때 필수 |
 | `SSO_JWT_JWKS_URL` | - | `RS256`일 때 필수 |
 | `SSO_JWT_AUDIENCE` / `SSO_JWT_ISSUER` | - | 선택 |
+| `REGULATION_DOCS_DIR` | `./data/raw/regulation` | 사규 원문 스테이징 디렉터리 |
+| `REVIEW_DOCS_DIR` | `./data/raw/review` | 검토서 원문 스테이징 디렉터리 (부서별 하위 폴더로 RBAC 구분) |
+| `FAQ_DOCS_DIR` | `./data/raw/faq` | FAQ 원문 스테이징 디렉터리 |
+| `LAW_CRAWLER` / `INTERPRETATION_CRAWLER` / `CASE_CRAWLER` | - | `모듈:함수` 형태의 실 크롤러 콜백. 미설정 시 해당 소스는 재색인에서 제외 |
+| `SYNC_INTERVAL_SECONDS` | `1800` | 주기 재색인 간격(초). `0`이면 시작 시 1회만 수행 |
+| `SYNC_STATE_PATH` | `./data/sync_state.json` | 삭제 감지용 소스별 마지막 id 목록 저장 경로 |
 
 ## 남은 작업 (TODO)
 
-1. **6대 소스 실 크롤러 연동** — 현재 `pipeline/connectors/*`는 전부 스텁이며 dev-mode로
-   주입한 문서만 반환합니다. 국가법령정보센터 OC 인증키 발급, 금융위/금감원 질의회신·
-   제재정보 접근 방식 확정, 사내 EDMS(규정/검토서) 접근 권한이 필요합니다.
+1. **법령/유권해석/제재사례 실 크롤러 작성** — `LawConnector`/`InterpretationConnector`/
+   `CaseConnector`는 이제 `fetch_items` 콜백만 주입하면 실제로 동작하지만(스텁 아님),
+   그 콜백 자체(law.go.kr Open API 호출, 금융위/금감원 질의회신·제재정보 크롤링)는
+   여전히 별도로 작성해야 합니다. 국가법령정보센터 OC 인증키 발급도 필요합니다.
+   사내 EDMS(규정/검토서/FAQ) 접근 권한이 확보되면, 지금의 로컬 파일 스테이징
+   커넥터를 EDMS 직접 연동 커넥터로 교체하면 됩니다.
 2. **Voyage 실 임베딩 검증 및 재보정** — `HashEmbedder`는 파이프라인 검증용 더미(문자
    n-gram 해싱)이며 의미 유사도를 반영하지 않습니다. `VOYAGE_API_KEY` 발급 후
    `VoyageEmbedder`로 교체하고, `knowledge/vector_store.py`의 `DEFAULT_MIN_SCORE`를 실

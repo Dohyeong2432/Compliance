@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import time
 
 import jwt
@@ -5,6 +7,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 SECRET = "test-secret-key-that-is-long-enough-1234"
+
+
+def _make_token(dept: str = "RETAIL") -> str:
+    return jwt.encode(
+        {"sub": "u1", "dept": dept, "iat": int(time.time()), "exp": int(time.time()) + 3600},
+        SECRET,
+        algorithm="HS256",
+    )
 
 
 @pytest.fixture
@@ -15,6 +25,18 @@ def api_env(monkeypatch, tmp_path):
     monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.delenv("SSO_JWT_ALGORITHM", raising=False)
     monkeypatch.delenv("SSO_JWT_SECRET", raising=False)
+    # Point every source connector at an empty/nonexistent tmp dir and turn
+    # off the background sync loop -- otherwise every TestClient startup
+    # would shell out to pandoc/catdoc/pdftotext against the real
+    # data/raw/* staging folders (slow, and not what these tests are for).
+    monkeypatch.setenv("REGULATION_DOCS_DIR", str(tmp_path / "no-regulation"))
+    monkeypatch.setenv("REVIEW_DOCS_DIR", str(tmp_path / "no-review"))
+    monkeypatch.setenv("FAQ_DOCS_DIR", str(tmp_path / "no-faq"))
+    monkeypatch.setenv("SYNC_STATE_PATH", str(tmp_path / "sync_state.json"))
+    monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
+    monkeypatch.delenv("LAW_CRAWLER", raising=False)
+    monkeypatch.delenv("INTERPRETATION_CRAWLER", raising=False)
+    monkeypatch.delenv("CASE_CRAWLER", raising=False)
 
 
 def test_chat_fails_closed_without_sso_config(api_env):
@@ -105,3 +127,79 @@ def test_health_endpoint(api_env):
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.fixture
+def require_pandoc():
+    if shutil.which("pandoc") is None:
+        pytest.skip("pandoc not installed")
+
+
+def test_startup_sync_ingests_regulation_docs_dir(api_env, monkeypatch, tmp_path, require_pandoc):
+    reg_dir = tmp_path / "regulation"
+    reg_dir.mkdir()
+    md = tmp_path / "source.md"
+    md.write_text("테스트 규정\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(reg_dir / "1. 테스트 규정.docx")], check=True)
+    monkeypatch.setenv("REGULATION_DOCS_DIR", str(reg_dir))
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        # startup sync already ran by the time the context manager returns
+        assert main_module.app.state.components.graph_store.has_entity("regulation:1")
+        del client  # unused, just need the context open through startup
+
+
+def test_admin_resync_requires_auth(api_env):
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        response = client.post("/admin/resync")
+    assert response.status_code == 501  # no SSO configured in this fixture by default
+
+
+def test_admin_resync_rejects_missing_token_when_sso_configured(api_env, monkeypatch):
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        response = client.post("/admin/resync")
+    assert response.status_code == 401
+
+
+def test_admin_resync_picks_up_file_added_after_startup(api_env, monkeypatch, tmp_path, require_pandoc):
+    reg_dir = tmp_path / "regulation"
+    reg_dir.mkdir()
+    monkeypatch.setenv("REGULATION_DOCS_DIR", str(reg_dir))
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        assert main_module.app.state.components.graph_store.has_entity("regulation:1") is False
+
+        md = tmp_path / "source.md"
+        md.write_text("나중에 올라온 규정\n\n본문 내용", encoding="utf-8")
+        subprocess.run(["pandoc", str(md), "-o", str(reg_dir / "1. 나중에 올라온 규정.docx")], check=True)
+
+        response = client.post("/admin/resync", headers={"Authorization": f"Bearer {_make_token()}"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    regulation_result = next(r for r in body["results"] if r["source"] == "regulation")
+    assert regulation_result["ingested"] == 1
+    assert main_module.app.state.components.graph_store.has_entity("regulation:1") is True

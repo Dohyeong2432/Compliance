@@ -23,6 +23,14 @@ class GraphStore(ABC):
         ...
 
     @abstractmethod
+    def delete_entity(self, entity_id: str) -> None:
+        """Remove an entity and any relations touching it. No-op if absent --
+        this backs periodic re-sync, where a source document disappearing
+        (a file deleted from data/raw/*, a row dropped from a crawler feed)
+        must not leave a stale, still-retrievable entity behind."""
+        ...
+
+    @abstractmethod
     def add_relation(self, relation: Relation) -> None:
         ...
 
@@ -136,6 +144,10 @@ class NetworkXGraphStore(GraphStore):
     def add_entity(self, entity: Entity) -> None:
         self._graph.add_node(entity.id, entity=entity)
 
+    def delete_entity(self, entity_id: str) -> None:
+        if entity_id in self._graph:
+            self._graph.remove_node(entity_id)  # also drops all incident edges
+
     def add_relation(self, relation: Relation) -> None:
         self._graph.add_edge(
             relation.source_id,
@@ -218,6 +230,11 @@ class KuzuGraphStore(GraphStore):
                 "allowed_depts": ",".join(entity.allowed_depts),
                 "source": entity.source,
             },
+        )
+
+    def delete_entity(self, entity_id: str) -> None:
+        self._conn.execute(
+            "MATCH (e:Entity {id: $id}) DETACH DELETE e", parameters={"id": entity_id}
         )
 
     def add_relation(self, relation: Relation) -> None:

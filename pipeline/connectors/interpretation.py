@@ -1,26 +1,39 @@
-"""금융위원회/금융감독원 유권해석(질의회신) 연동 스텁.
+"""금융위원회/금융감독원 유권해석(질의회신)을 실제 크롤링한 데이터를 색인하는 커넥터.
 
-실 연동에 필요한 것:
-  - 금융위 법령해석 회신 게시판 및 금감원 질의응답 시스템 접근(공개 API 없는
-    항목은 승인된 크롤링 또는 정기 다운로드 필요)
-  - 회신 문서 -> 관련 법령 조항 매핑 규칙 (INTERPRETS 관계 생성용)
+크롤링 자체(사이트 접근, HTML 파싱, 페이지네이션)는 여기서 하지 않는다 --
+공개 API가 없는 게시판형 자료이므로 어차피 사이트별 구현이 필요하고, 그건
+호출 측이 작성한 fetch_items 콜백의 책임이다. 여기서는 그 콜백이 반환한
+dict를 온톨로지(RawDocument/Relation)로 변환하는 것만 담당한다. dict 스키마는
+pipeline/connectors/crawler_base.py 참고.
+
+item에 "interprets": "law:<조항 id>" 또는 "regulation:<규정 id>" (또는 그
+리스트)를 채우면 INTERPRETS 관계가 자동 생성되어, 해당 법령/규정 조회 시
+1-hop 확장으로 관련 유권해석이 함께 노출된다.
+
+사용 예:
+    def crawl_interpretation_items() -> list[dict]:
+        ...  # 금융위/금감원 질의회신 게시판 크롤링
+
+    connector = InterpretationConnector(fetch_items=crawl_interpretation_items)
+    pipeline.ingest_connector(connector)
+
+documents=[...]를 넘기면(dev/test 전용) 크롤러 없이 고정된 RawDocument 목록을
+그대로 반환한다 -- seed_data/seed.py가 이 경로를 쓴다.
 """
 
 from __future__ import annotations
 
-from ontology.schema import EntityType
-from pipeline.connectors.base import RawDocument, SourceConnector
+from typing import Any
+
+from ontology.schema import EntityType, RelationType
+from pipeline.connectors.crawler_base import CrawledSourceConnector
 
 
-class InterpretationConnector(SourceConnector):
+class InterpretationConnector(CrawledSourceConnector):
     entity_type = EntityType.INTERPRETATION
 
-    def __init__(self, documents: list[RawDocument] | None = None):
-        self._documents = documents
-
-    def fetch(self) -> list[RawDocument]:
-        if self._documents is not None:
-            return self._documents
-        raise NotImplementedError(
-            "InterpretationConnector 실 연동 미구현: 금융위/금감원 질의회신 접근 승인이 필요합니다."
-        )
+    def _convenience_relations(self, item: dict[str, Any]) -> list[tuple[RelationType, str]]:
+        targets = item.get("interprets") or []
+        if isinstance(targets, str):
+            targets = [targets]
+        return [(RelationType.INTERPRETS, target_id) for target_id in targets]

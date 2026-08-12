@@ -47,10 +47,13 @@
 [데이터 파이프라인]  IngestPipeline (pipeline/ingest.py)
      RawDocument → (REVIEW 타입이면 PII 마스킹) → Entity/Relation → 그래프+벡터 동시 색인
                         ▲
-     6대 소스 커넥터(pipeline/connectors/*, 전부 스텁):
+     IngestSyncer (pipeline/sync.py) — 시작 시 1회 + SYNC_INTERVAL_SECONDS마다
+     반복 재색인, 사라진 문서는 그래프+벡터 양쪽에서 명시적으로 삭제
+                        ▲
+     6대 소스 커넥터(pipeline/connectors/*):
      LAW(국가법령정보센터) / INTERPRETATION(금융위·금감원 질의회신) /
-     CASE(금감원 제재정보공개) / REGULATION(사내 EDMS) / REVIEW(사내 EDMS, 부서 한정) /
-     FAQ(준법감시부 위키)
+     CASE(금감원 제재정보공개) — fetch_items 콜백으로 실 크롤러 연결
+     REGULATION / REVIEW(부서 한정) / FAQ — 로컬 파일 스테이징(docx/doc/pdf)
 ```
 
 ## 모듈별 책임
@@ -88,13 +91,34 @@
 임시방편은 그만큼 무관한 문서의 오검색률을 높이므로 권장하지 않습니다.
 
 ### `pipeline/connectors/local_file.py`
-`LocalFileRegulationConnector`는 `data/raw/regulation/`에 올려둔 사규 원문
-(docx/doc/pdf)을 `pandoc`/`catdoc`/`pdftotext` CLI로 텍스트 추출해
-`RawDocument`로 변환합니다. 실 EDMS 연동(`RegulationConnector`) 전까지 쓰는
-임시 로더입니다. 파일 하나가 파싱 실패해도(예: 확장자만 `.docx`인 DRM 암호화
-파일) 전체 배치가 죽지 않고 `connector.errors`에 사유와 함께 기록되며 나머지
-파일은 정상 처리됩니다 — 이 동작은 실제로 4개 사규 파일 중 1개가 사내 문서보안
-솔루션(`DOCUMENT SAFER`)으로 암호화되어 있던 것을 만나며 확인했습니다.
+`LocalFileConnector`는 entity_type을 매개변수로 받는 제네릭 로컬 파일
+커넥터로, `data/raw/{regulation,review,faq}/`에 올려둔 원문(docx/doc/pdf)을
+`pandoc`/`catdoc`/`pdftotext` CLI로 텍스트 추출해 `RawDocument`로 변환합니다.
+`LocalFileRegulationConnector`/`LocalFileReviewConnector`/`LocalFileFaqConnector`는
+이를 감싼 엔티티 타입별 얇은 서브클래스입니다. 실 EDMS/사내 위키 연동 전까지
+쓰는 임시 로더입니다. 파일 하나가 파싱 실패해도(예: 확장자만 `.docx`인 DRM
+암호화 파일) 전체 배치가 죽지 않고 `connector.errors`에 사유와 함께 기록되며
+나머지 파일은 정상 처리됩니다 — 이 동작은 실제로 사규 파일 중 1개가 사내
+문서보안 솔루션(`DOCUMENT SAFER`)으로 암호화되어 있던 것을 만나며 확인했습니다.
+
+디렉터리는 재귀적으로 순회하며, 파일이 루트 바로 아래가 아니라 한 단계
+하위 폴더에 있으면 그 폴더명이 `allowed_depts`가 됩니다(예:
+`data/raw/review/IB/문서.docx` → `allowed_depts=("IB",)`). REVIEW는 이
+시스템에서 RBAC가 실제로 걸리는 소스이므로, 부서 한정 검토서를 실수로 루트에
+두면 전사 공개로 색인된다는 뜻입니다 — `data/raw/review/README.md`에 이 점을
+명시해 두었습니다.
+
+### `pipeline/connectors/crawler_base.py`
+`CrawledSourceConnector`는 `LawConnector`/`InterpretationConnector`/
+`CaseConnector`의 공통 베이스입니다. law.go.kr은 인증키가, 금융위/금감원
+질의회신·제재정보는 공개 API 자체가 없어 사이트별 크롤링이 필요한데, 이
+코드베이스는 그 크롤링(HTTP 호출, HTML/XML 파싱)을 대신 해주지 않습니다 —
+검증할 수 없는 사이트 구조를 하드코딩하는 대신, `fetch_items`로 주입받은
+콜백(인자 없이 `list[dict]` 반환)의 결과를 `RawDocument`/`Relation`으로
+매핑하는 부분만 담당합니다. 관계 매핑은 편의 키(`supersedes`/`interprets`/
+`violates`)와 범용 `relations` 키를 함께 지원합니다. `documents=[...]`로
+생성하면(dev/test 전용) 크롤러 없이 고정 목록을 그대로 반환하는 기존 경로가
+그대로 유지되며, `seed_data/seed.py`가 이 경로를 씁니다.
 
 ### `knowledge/retriever.py`
 `HybridRetriever.retrieve()`가 위 "전체 흐름"의 5단계를 그대로 구현합니다.
@@ -117,10 +141,31 @@
   검증/거부된 인용, 최종 답변).
 
 ### `pipeline/`
-6개 커넥터(`pipeline/connectors/*`)는 전부 실 연동 미구현 스텁이며, 생성자에
-`documents=`를 주입하면(dev-mode) 그 목록을 그대로 반환해 파이프라인 전체를
-end-to-end로 검증할 수 있습니다. `IngestPipeline`은 `EntityType.REVIEW` 문서에
+6개 커넥터(`pipeline/connectors/*`) 중 REGULATION/REVIEW/FAQ는 로컬 파일
+스테이징으로, LAW/INTERPRETATION/CASE는 주입된 크롤러 콜백으로 실제 동작합니다
+(둘 다 `documents=`를 주입하면 dev-mode로 고정 목록을 그대로 반환하는 경로도
+그대로 남아 있어, `seed_data/seed.py`나 테스트에서 파이프라인 전체를
+end-to-end로 검증할 수 있습니다). `IngestPipeline`은 `EntityType.REVIEW` 문서에
 대해 커넥터 구현 여부와 무관하게 항상 `pipeline/masking.py`로 마스킹을 적용합니다.
+
+### `pipeline/sync.py`
+`IngestSyncer`가 "문서 자동 재색인/동기화"를 담당합니다. `GraphStore.add_entity`
+/ `VectorStore.upsert`가 이미 id 기준 upsert이므로, 각 커넥터의 현재 `fetch()`
+결과를 그대로 다시 `ingest_documents()`에 넘기기만 해도 추가/수정 반영은 공짜로
+됩니다. 이 클래스가 그 위에 얹는 유일한 로직은 **삭제 감지**입니다: 소스별로
+마지막에 본 id 집합을 기억해두었다가, 이번 fetch()에서 사라진 id를
+`graph_store.delete_entity()` / `vector_store.delete()`로 명시적으로 지웁니다
+— 그냥 재색인만 반복하면 삭제된 원문(예: data/raw/regulation/에서 지운
+파일)이 계속 검색 결과에 남는데, 이 프로젝트가 막으려는 "조용히 틀린 답"의
+전형적인 사례이기 때문입니다. 소스 하나의 `fetch()`가 실패해도(크롤러 다운 등)
+나머지 소스는 계속 처리되며, `state_path`를 지정하면 마지막 id 집합을 JSON으로
+영속화해 프로세스 재시작 후에도 삭제 감지가 끊기지 않습니다(다만 그 상태
+자체가 한 번도 기록되기 전에 지워진 문서는 소급 감지할 수 없다는 한계는
+클래스 docstring에 명시해 두었습니다). `api/main.py`의 lifespan이 시작 시
+1회 `sync_once()`를 실행하고, `SYNC_INTERVAL_SECONDS > 0`이면
+`run_forever()`를 백그라운드 태스크로 띄웁니다. `POST /admin/resync`는 이
+주기를 기다리지 않고 즉시 재색인을 트리거합니다(같은 SSO 인증 게이트 사용,
+아직 별도 역할 기반 권한 검사는 없음).
 
 ## 테스트로 검증한 시나리오
 

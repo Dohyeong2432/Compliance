@@ -1,10 +1,12 @@
-"""Local filesystem regulation connector.
+"""Local filesystem document connector, generalized across entity types.
 
-Reads staged regulation documents from a directory (docx/doc/pdf) and
-converts them into RawDocument objects. This stands in for a real EDMS
-connection (see pipeline/connectors/regulation.py's TODO) so documents
-uploaded to data/raw/regulation/ can be ingested before that connection
-exists.
+Reads staged documents from a directory (docx/doc/pdf) and converts them
+into RawDocument objects. Originally built for sagyu (REGULATION) as a
+stand-in for a real EDMS connection (see pipeline/connectors/regulation.py's
+TODO); REVIEW and FAQ documents are staged the same way (see
+pipeline/connectors/review.py / faq.py for their thin subclasses), since
+none of the three has a real system connection yet and all three arrive as
+docx/doc/pdf files in practice.
 
 Shells out to external CLI tools rather than parsing formats in pure
 Python, since Korean legacy .doc (CP949-encoded OLE compound files) and
@@ -18,6 +20,15 @@ Files that fail to parse (wrong extension, corrupted, or -- as observed
 with one seed file -- DRM-encrypted despite a .docx extension) are
 skipped, not fatal: fetch() collects them in self.errors instead of
 raising, so one bad file doesn't block ingesting the rest of the batch.
+
+The directory is walked recursively. A file directly under the root
+directory gets the connector's default allowed_depts (ALL unless
+overridden); a file nested one level down gets that subfolder's name as
+its allowed_depts, e.g. <directory>/IB/문서.docx -> allowed_depts=("IB",).
+This matters most for REVIEW documents, which are the Chinese-wall-gated
+source in this system's ontology -- staging an IB-only review under an
+"IB" subfolder is what actually restricts it to IB sessions, so put
+department-restricted files in a subfolder rather than the directory root.
 """
 
 from __future__ import annotations
@@ -96,11 +107,23 @@ def _external_id_from_filename(path: Path) -> str:
     return re.sub(r"[^\w]+", "-", path.stem).strip("-").lower()
 
 
-class LocalFileRegulationConnector(SourceConnector):
-    entity_type = EntityType.REGULATION
+class LocalFileConnector(SourceConnector):
+    """entity_type을 매개변수로 받는 제네릭 로컬 파일 커넥터.
 
-    def __init__(self, directory: str, allowed_depts: tuple[str, ...] = (ALL_DEPARTMENTS,)):
+    REGULATION 전용이던 원래 구현을 REVIEW/FAQ 등 "문서 기반이지만 실 시스템
+    연동은 아직 없는" 소스 전반에 재사용할 수 있도록 일반화한 것. 편의를 위해
+    pipeline/connectors/{local_file,review,faq}.py에 엔티티 타입별 서브클래스가
+    있다.
+    """
+
+    def __init__(
+        self,
+        directory: str,
+        entity_type: EntityType,
+        allowed_depts: tuple[str, ...] = (ALL_DEPARTMENTS,),
+    ):
         self.directory = Path(directory)
+        self.entity_type = entity_type
         self.allowed_depts = allowed_depts
         self.errors: list[tuple[Path, str]] = []
 
@@ -108,7 +131,10 @@ class LocalFileRegulationConnector(SourceConnector):
         self.errors = []
         documents: list[RawDocument] = []
 
-        for path in sorted(self.directory.iterdir()):
+        if not self.directory.exists():
+            return documents
+
+        for path in sorted(self.directory.rglob("*")):
             if not path.is_file() or path.suffix.lower() not in _SUPPORTED_SUFFIXES:
                 continue
             try:
@@ -124,9 +150,23 @@ class LocalFileRegulationConnector(SourceConnector):
                     title=_parse_title(text),
                     body=text.strip(),
                     effective_date=_parse_latest_effective_date(text),
-                    source=f"사내 EDMS (로컬 스테이징 원본: {path.name})",
-                    allowed_depts=self.allowed_depts,
+                    source=f"로컬 스테이징 원본 ({path.relative_to(self.directory)})",
+                    allowed_depts=self._allowed_depts_for(path),
                 )
             )
 
         return documents
+
+    def _allowed_depts_for(self, path: Path) -> tuple[str, ...]:
+        rel_parts = path.relative_to(self.directory).parts
+        if len(rel_parts) > 1:
+            # <directory>/<부서코드>/파일 형태면 그 하위 폴더명을 부서코드로 사용.
+            return (rel_parts[0],)
+        return self.allowed_depts
+
+
+class LocalFileRegulationConnector(LocalFileConnector):
+    """REGULATION 전용 편의 서브클래스 (하위 호환 유지)."""
+
+    def __init__(self, directory: str, allowed_depts: tuple[str, ...] = (ALL_DEPARTMENTS,)):
+        super().__init__(directory, EntityType.REGULATION, allowed_depts)
