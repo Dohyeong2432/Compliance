@@ -39,6 +39,11 @@ def test_external_id_slugifies_when_no_leading_number():
     assert _external_id_from_filename(Path("no number here.docx")) == "no-number-here"
 
 
+def test_external_id_slugifies_korean_filename_without_leading_number():
+    path = Path("겸직 보수배분 기준 (수정).docx")
+    assert _external_id_from_filename(path) == "겸직-보수배분-기준-수정"
+
+
 @pytest.fixture
 def require_pandoc():
     if shutil.which("pandoc") is None:

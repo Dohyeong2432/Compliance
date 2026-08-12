@@ -86,7 +86,9 @@ def _external_id_from_filename(path: Path) -> str:
     match = _LEADING_NUMBER.match(path.stem)
     if match:
         return match.group(1)
-    return re.sub(r"[^a-zA-Z0-9]+", "-", path.stem).strip("-").lower()
+    # \w is unicode-aware in Python 3, so this keeps Korean characters
+    # instead of collapsing filenames with no ASCII letters to "".
+    return re.sub(r"[^\w]+", "-", path.stem).strip("-").lower()
 
 
 class LocalFileRegulationConnector(SourceConnector):
