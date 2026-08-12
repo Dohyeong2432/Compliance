@@ -49,12 +49,46 @@ Selenium이 Chrome을 직접 실행하므로 로컬 PC(또는 Chrome이 설치�
     않도록 접두어 일치로 고쳤습니다.
   - `open_law_detail_by_name(browser, site_category, law_name)` — 이름을
     아는 법령 하나를 목록에서 찾아 여는, 참고 코드와 가장 가까운 진입점.
+  - `open_law_or_reg_detail_by_name(browser, name)` — 위 함수를
+    `site_category="law"`로 먼저 시도하고, 실패하면 `"reg"`로 재시도합니다.
+    법규리스트에는 법령/행정규칙 구분이 없으므로(law.go.kr 자체가 두
+    사이트로 나뉘어 있을 뿐) 이름 하나로 양쪽을 다 확인해야 할 때 씁니다.
+    둘 다 실패하면 `RuntimeError`.
   - `crawl_law_items()` — 목록의 모든 행을 순서대로 열었다가 같은 페이지로
     돌아와 다음 행을 여는 전체 수집 루프. `click_row_by_number`/
     `wait_for_detail_page` 자체는 검증된 로직이지만, 이 "전부 순회" 반복은
     참고 코드에 없던 확장이라 아직 실제 사이트에서 통짜로 돌려보지는
     못했습니다 — 처음엔 `crawl_law_items(from_date=...)`로 범위를 좁히거나,
     이름 하나로 `fetch_law_item_by_name()`을 먼저 확인해보길 권합니다.
+
+### 추적 대상만 색인: `crawl_watchlist_items()` (권장)
+
+law.go.kr 전체를 도는 대신, 실제 업무 관련 법령/행정규칙만 골라둔
+`crawlers/law_watchlist.py`의 `LAW_WATCHLIST`(사용자가 관리하는
+법규리스트.xlsx에서 그대로 옮긴 164개 항목)만 찾아서 색인하는 진입점입니다.
+
+```python
+from crawlers.law_go_kr import crawl_watchlist_items
+
+items = crawl_watchlist_items()  # LAW_WATCHLIST 전체를 기본으로 사용
+```
+
+- 이름 하나마다 `open_law_or_reg_detail_by_name()` → `get_body_content_html()`
+  → `parse_law_body_html()` → `law_detail_to_items()`를 거쳐 결과를 모읍니다.
+- 목록에 없거나 사이트 구조가 달라 파싱이 실패하는 항목이 있어도 전체를
+  멈추지 않고 그 항목만 로그로 남기고 건너뜁니다(`logging.getLogger(__name__)`).
+- `names=[...]`로 특정 이름만 넘겨 부분 실행/디버깅도 가능합니다.
+- `browser=`를 넘기지 않으면 내부적으로 `get_browser()`로 새로 띄우고
+  끝나면 스스로 종료합니다. 이미 열려 있는 browser를 넘기면(예: 다른 작업과
+  공유) 이 함수는 그 browser를 닫지 않습니다 — 호출한 쪽 책임입니다.
+- 새 법령/행정규칙을 추적하려면 `crawlers/law_watchlist.py`의
+  `LAW_WATCHLIST`에 이름만 추가하면 됩니다.
+
+`.env`에는 아래처럼 지정하면 됩니다(전체 수집용 `crawl_law_items` 대신):
+
+```
+LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items
+```
 
 ## 더 다듬고 싶다면
 

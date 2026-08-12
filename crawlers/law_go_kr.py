@@ -40,6 +40,7 @@ pipeline.connectors.law.LawConnector(fetch_items=...)에 연결하려면:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -504,6 +505,60 @@ def fetch_law_item_by_name(browser: webdriver.Chrome, site_category: str, law_na
     html = get_body_content_html(browser)
     meta = parse_law_body_html(html)
     return law_detail_to_items(meta, source_url=browser.current_url)
+
+
+# ---------------------------------------------------------------------------
+# 관리 목록(law_watchlist.LAW_WATCHLIST) 기반 크롤링
+#
+# law.go.kr 전체를 크롤링하는 crawl_law_items() 대신, 실제 업무에 쓰는
+# 법령/행정규칙만 정해두고 그것만 찾아 색인한다. 목록에는 law.go.kr에서
+# 법령/행정규칙 어느 쪽인지 구분이 없으므로(원본 법규리스트.xlsx도 마찬가지),
+# 'law'에서 먼저 찾고 없으면 'reg'에서 찾는다 -- 원본 get_update_df와
+# 동일한 방식(law/reg 두 목록 모두에서 이름을 대조).
+# ---------------------------------------------------------------------------
+
+def open_law_or_reg_detail_by_name(browser: webdriver.Chrome, name: str) -> str:
+    """name을 'law'(법령)에서 먼저 찾고, 없으면 'reg'(행정규칙)에서 찾아 상세
+    페이지를 연다. 찾아서 연 쪽의 site_category를 반환."""
+    for site_category in ("law", "reg"):
+        try:
+            open_law_detail_by_name(browser, site_category, name)
+            return site_category
+        except RuntimeError:
+            continue
+    raise RuntimeError(f"'{name}'을(를) 법령/행정규칙 목록 어디에서도 찾지 못했습니다")
+
+
+def crawl_watchlist_items(
+    browser: webdriver.Chrome | None = None, names: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items 로 연결되는 진입점.
+
+    names를 지정하지 않으면 law_watchlist.LAW_WATCHLIST(사용자가 관리하는
+    법규리스트.xlsx에서 옮긴 목록)를 사용한다. 목록에 있는 항목 하나를
+    못 찾거나 파싱에 실패해도 전체가 죽지 않고 그 항목만 건너뛴다 -- 나머지
+    163개를 위해 실패한 1개 때문에 SYNC_INTERVAL_SECONDS 주기 전체가 비는
+    일은 없어야 하므로.
+    """
+    from crawlers.law_watchlist import LAW_WATCHLIST
+
+    names = names if names is not None else LAW_WATCHLIST
+    owns_browser = browser is None
+    browser = browser or get_browser()
+    try:
+        items: list[dict[str, Any]] = []
+        for name in names:
+            try:
+                site_category = open_law_or_reg_detail_by_name(browser, name)
+                html = get_body_content_html(browser)
+                meta = parse_law_body_html(html)
+                items.extend(law_detail_to_items(meta, source_url=browser.current_url))
+            except Exception:
+                logging.getLogger(__name__).exception("watchlist 항목 '%s' 크롤링 실패, 건너뜀", name)
+        return items
+    finally:
+        if owns_browser:
+            browser.quit()
 
 
 def crawl_law_items(browser: webdriver.Chrome | None = None, from_date: date | None = None) -> list[dict[str, Any]]:

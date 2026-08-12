@@ -4,12 +4,16 @@ from unittest.mock import MagicMock
 import pytest
 from selenium.common.exceptions import TimeoutException
 
+import crawlers.law_go_kr as law_go_kr
 from crawlers.law_go_kr import (
     click_row_by_number,
+    crawl_watchlist_items,
     law_detail_to_items,
+    open_law_or_reg_detail_by_name,
     parse_law_body_html,
     wait_for_detail_page,
 )
+from crawlers.law_watchlist import LAW_WATCHLIST
 from ontology.schema import RelationType
 
 FIXTURE = Path(__file__).parent / "fixtures" / "law_go_kr_body.html"
@@ -194,3 +198,89 @@ def test_wait_for_detail_page_times_out_without_match():
 
     with pytest.raises(TimeoutException):
         wait_for_detail_page(browser, "찾는 법령명", timeout=1)
+
+
+# ---------------------------------------------------------------------------
+# law_watchlist.LAW_WATCHLIST / crawl_watchlist_items
+# ---------------------------------------------------------------------------
+
+def test_watchlist_has_164_unique_nonempty_entries():
+    assert len(LAW_WATCHLIST) == 164
+    assert len(set(LAW_WATCHLIST)) == 164
+    assert all(isinstance(name, str) and name.strip() for name in LAW_WATCHLIST)
+
+
+def test_open_law_or_reg_detail_by_name_tries_law_then_falls_back_to_reg(monkeypatch):
+    calls = []
+
+    def fake_open(browser, site_category, name):
+        calls.append(site_category)
+        if site_category == "law":
+            raise RuntimeError("not in law listing")
+        return None
+
+    monkeypatch.setattr(law_go_kr, "open_law_detail_by_name", fake_open)
+
+    result = open_law_or_reg_detail_by_name(MagicMock(), "자금세탁방지및공중협박자금조달금지에관한업무규정")
+
+    assert calls == ["law", "reg"]
+    assert result == "reg"
+
+
+def test_open_law_or_reg_detail_by_name_returns_law_without_trying_reg(monkeypatch):
+    calls = []
+
+    def fake_open(browser, site_category, name):
+        calls.append(site_category)
+
+    monkeypatch.setattr(law_go_kr, "open_law_detail_by_name", fake_open)
+
+    result = open_law_or_reg_detail_by_name(MagicMock(), "개인정보보호법")
+
+    assert calls == ["law"]
+    assert result == "law"
+
+
+def test_open_law_or_reg_detail_by_name_raises_when_neither_has_it(monkeypatch):
+    def fake_open(browser, site_category, name):
+        raise RuntimeError("not found")
+
+    monkeypatch.setattr(law_go_kr, "open_law_detail_by_name", fake_open)
+
+    with pytest.raises(RuntimeError):
+        open_law_or_reg_detail_by_name(MagicMock(), "존재하지않는법")
+
+
+def test_crawl_watchlist_items_skips_failures_and_continues(monkeypatch):
+    def fake_open_or_reg(browser, name):
+        if name == "실패하는법":
+            raise RuntimeError("boom")
+        return "law"
+
+    monkeypatch.setattr(law_go_kr, "open_law_or_reg_detail_by_name", fake_open_or_reg)
+    monkeypatch.setattr(law_go_kr, "get_body_content_html", lambda browser: "<html></html>")
+    monkeypatch.setattr(law_go_kr, "parse_law_body_html", lambda html: {"law_id": "x", "articles": [], "addenda": []})
+    monkeypatch.setattr(
+        law_go_kr, "law_detail_to_items", lambda meta, source_url="": [{"id": f"item-{source_url}"}]
+    )
+
+    browser = MagicMock()
+    browser.current_url = "https://example"
+    items = crawl_watchlist_items(browser=browser, names=["실패하는법", "성공하는법"])
+
+    assert items == [{"id": "item-https://example"}]
+    browser.quit.assert_not_called()  # caller-supplied browser must not be closed by us
+
+
+def test_crawl_watchlist_items_defaults_to_law_watchlist(monkeypatch):
+    seen_names = []
+
+    def fake_open_or_reg(browser, name):
+        seen_names.append(name)
+        raise RuntimeError("skip everything, just record names")
+
+    monkeypatch.setattr(law_go_kr, "open_law_or_reg_detail_by_name", fake_open_or_reg)
+
+    crawl_watchlist_items(browser=MagicMock())
+
+    assert seen_names == LAW_WATCHLIST
