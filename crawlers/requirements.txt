@@ -1,0 +1,12 @@
+# law.go.kr Selenium 크롤러 전용 의존성. FastAPI 서버(requirements.txt)에는
+# 포함하지 않습니다 -- 브라우저/드라이버가 배포 컨테이너에 불필요한 무게를
+# 더하고, 서버 런타임은 이 모듈을 LAW_CRAWLER로 "가져다 쓰기"만 하지
+# Selenium을 직접 구동할 필요가 없기 때문입니다. 크롤러를 실행하는 쪽
+# (로컬 PC, 별도 배치 작업 등)에서만 설치하세요.
+#   pip install -r crawlers/requirements.txt
+selenium>=4.20
+webdriver-manager>=4.0
+beautifulsoup4>=4.12
+pandas>=2.2
+lxml>=5.0
+openpyxl>=3.1
