@@ -153,7 +153,12 @@ def build_components() -> AppComponents:
     audit_logger = AuditLogger(os.environ.get("AUDIT_LOG_PATH", "./data/audit.jsonl"))
     sso_config = SSOConfig.from_env()
 
-    pipeline = IngestPipeline(embedder, vector_store, graph_store)
+    pipeline = IngestPipeline(
+        embedder,
+        vector_store,
+        graph_store,
+        embed_cache_path=os.environ.get("EMBED_CACHE_PATH", "./data/embed_cache.json"),
+    )
     syncer = IngestSyncer(
         pipeline=pipeline,
         graph_store=graph_store,

@@ -123,6 +123,20 @@ connector = LawConnector(fetch_items=crawl_law_items)
 형태로 지정하세요(`INTERPRETATION_CRAWLER`, `CASE_CRAWLER`도 동일). 미설정 시 해당
 소스는 에러 없이 그냥 재색인 대상에서 빠집니다.
 
+## 임베딩 캐시
+
+재색인은 매 사이클 모든 소스의 fetch() 결과 전체를 다시 임베딩 API(Voyage/Gemini)로
+보내는 게 기본 동작입니다 — 사규 파일이든 크롤러 결과든, 바뀐 게 없어도
+매번 다시 임베딩하면 유료/무료 등급 API 호출량이 불필요하게 커집니다.
+`EMBED_CACHE_PATH`(기본 `./data/embed_cache.json`)를 지정하면
+`IngestPipeline`이 문서 id별로 "마지막으로 임베딩한 텍스트의 해시값 +
+그때 벡터"를 캐시해뒀다가, 텍스트가 그대로면 임베딩 API를 다시 부르지
+않고 캐시된 벡터를 그대로 씁니다. 그래프/벡터 스토어에 넣는 것(upsert)
+자체는 캐시 여부와 상관없이 매번 합니다 — `VECTOR_STORE_BACKEND=memory`는
+재시작하면 비어 있으므로, 임베딩만 아끼고 저장은 항상 다시 해야 검색이
+됩니다. 캐시를 끄고 싶으면(항상 재임베딩) `EMBED_CACHE_PATH`를 빈 값으로
+두세요.
+
 ## 자동 재색인/동기화
 
 `uvicorn api.main:app`으로 띄운 서버는:
@@ -160,6 +174,7 @@ curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO J
 | `ANTHROPIC_API_KEY` | - | `LLM_BACKEND=anthropic`일 때 필수 |
 | `GEMINI_API_KEY` | - | `LLM_BACKEND=gemini` 또는 `EMBEDDER_BACKEND=gemini`일 때 필수 (Google AI Studio에서 무료로 발급) |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | `LLM_BACKEND=gemini`일 때 사용할 모델 |
+| `EMBED_CACHE_PATH` | `./data/embed_cache.json` | 문서 내용이 안 바뀌면 재색인 때 임베딩 API 재호출을 건너뛰는 캐시 경로. 빈 값이면 매번 재임베딩 |
 | `AUDIT_LOG_PATH` | `./data/audit.jsonl` | 감사로그 경로 |
 | `SSO_JWT_ALGORITHM` | - | `HS256` \| `RS256`. 미설정 시 서버는 모든 `/chat` 요청을 501로 거부(fail-closed) |
 | `SSO_JWT_SECRET` | - | `HS256`일 때 필수 |
