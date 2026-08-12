@@ -51,22 +51,30 @@ class UnparsableDocumentError(RuntimeError):
 
 
 def _extract_text(path: Path) -> str:
+    # encoding="utf-8" is required, not just nice-to-have: pandoc/catdoc/
+    # pdftotext all emit UTF-8 regardless of the host OS, but
+    # subprocess.run(..., text=True) without an explicit encoding decodes
+    # using the platform's preferred encoding -- cp949 on Korean Windows --
+    # which raises UnicodeDecodeError (silently, in a background reader
+    # thread) on any non-ASCII output. That leaves result.stdout as None
+    # rather than raising where this function could catch it, so this isn't
+    # optional on Windows.
     suffix = path.suffix.lower()
     try:
         if suffix == ".docx":
             result = subprocess.run(
                 ["pandoc", "-t", "plain", str(path)],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, encoding="utf-8", check=True,
             )
         elif suffix == ".doc":
             result = subprocess.run(
                 ["catdoc", "-s", "cp949", "-d", "utf-8", str(path)],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, encoding="utf-8", check=True,
             )
         elif suffix == ".pdf":
             result = subprocess.run(
-                ["pdftotext", "-layout", str(path), "-"],
-                capture_output=True, text=True, check=True,
+                ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"],
+                capture_output=True, text=True, encoding="utf-8", check=True,
             )
         else:
             raise UnparsableDocumentError(f"Unsupported file type: {suffix}")
