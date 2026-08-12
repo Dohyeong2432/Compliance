@@ -38,9 +38,9 @@ class HashEmbedder(Embedder):
     A prior evaluation found it can rank a sanctions case above the correct
     statute purely on lexical overlap, so treat search quality under this
     embedder as a pipeline smoke test, not a proxy for retrieval quality.
-    Swap in VoyageEmbedder for real semantic recall; DEFAULT_MIN_SCORE in
-    vector_store.py is calibrated to THIS embedder's score distribution and
-    must be re-tuned when switching embedders.
+    Swap in VoyageEmbedder or GeminiEmbedder for real semantic recall;
+    DEFAULT_MIN_SCORE in vector_store.py is calibrated to THIS embedder's
+    score distribution and must be re-tuned when switching embedders.
     """
 
     def __init__(self, dimension: int = 256, ngram_sizes: tuple[int, ...] = (2, 3)):
@@ -107,4 +107,60 @@ class VoyageEmbedder(Embedder):
     def embed(self, texts: Sequence[str]) -> list[Vector]:
         request = self._build_request(texts)
         response = self._client.embed(**request)
+        return self._parse_response(response)
+
+
+class GeminiEmbedder(Embedder):
+    """Gemini embeddings API wrapper (gemini-embedding-001 by default).
+
+    gemini-embedding-001 natively outputs 3072-d vectors but supports
+    Matryoshka truncation via output_dimensionality, so `dimension` both
+    requests and validates the size actually returned. Same DEFAULT_MIN_SCORE
+    recalibration caveat as VoyageEmbedder applies when switching to this
+    embedder (see HashEmbedder docstring).
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gemini-embedding-001",
+        dimension: int = 768,
+        task_type: str = "RETRIEVAL_DOCUMENT",
+    ):
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set; cannot construct GeminiEmbedder")
+        self.model = model
+        self.dimension = dimension
+        self.task_type = task_type
+        self._client = self._build_client()
+
+    def _build_client(self):
+        from google import genai  # optional dependency, only needed for live calls
+
+        return genai.Client(api_key=self.api_key)
+
+    def _build_request(self, texts: Sequence[str]) -> dict:
+        return {
+            "model": self.model,
+            "contents": list(texts),
+            "config": {"task_type": self.task_type, "output_dimensionality": self.dimension},
+        }
+
+    def _parse_response(self, response) -> list[Vector]:
+        embeddings = getattr(response, "embeddings", None)
+        if embeddings is None and isinstance(response, dict):
+            embeddings = response.get("embeddings")
+        if embeddings is None:
+            raise ValueError("Gemini response is missing 'embeddings'")
+        return [self._values_of(e) for e in embeddings]
+
+    def _values_of(self, embedding) -> Vector:
+        if isinstance(embedding, dict):
+            return list(embedding["values"])
+        return list(embedding.values)
+
+    def embed(self, texts: Sequence[str]) -> list[Vector]:
+        request = self._build_request(texts)
+        response = self._client.models.embed_content(**request)
         return self._parse_response(response)

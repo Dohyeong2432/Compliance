@@ -18,13 +18,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from agent.harness import ComplianceAgent
-from agent.llm_client import AnthropicLLMClient, LLMClient
+from agent.llm_client import AnthropicLLMClient, GeminiLLMClient, LLMClient
 from agent.sso import SSOAuthError, SSOConfigError, build_session_context
 from bootstrap import AppComponents, build_components
 
@@ -69,9 +70,18 @@ class ChatResponse(BaseModel):
     rejected_citations: list[str]
 
 
+def _build_llm_client() -> LLMClient:
+    backend = os.environ.get("LLM_BACKEND", "anthropic").lower()
+    if backend == "anthropic":
+        return AnthropicLLMClient()
+    if backend == "gemini":
+        return GeminiLLMClient(model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+    raise RuntimeError(f"Unknown LLM_BACKEND: {backend}")
+
+
 def _get_llm_client() -> LLMClient:
     if app.state.llm_client is None:
-        app.state.llm_client = AnthropicLLMClient()
+        app.state.llm_client = _build_llm_client()
     return app.state.llm_client
 
 

@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from knowledge.embedder import HashEmbedder, VoyageEmbedder
+from knowledge.embedder import GeminiEmbedder, HashEmbedder, VoyageEmbedder
 
 
 def test_hash_embedder_is_deterministic():
@@ -56,3 +56,44 @@ def test_voyage_embedder_request_and_response_parsing_without_network(monkeypatc
 
     with pytest.raises(ValueError):
         embedder._parse_response({})
+
+
+def test_gemini_embedder_requires_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        GeminiEmbedder(api_key=None)
+
+
+def test_gemini_embedder_request_and_response_parsing_without_network(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+
+    embedder = GeminiEmbedder.__new__(GeminiEmbedder)
+    embedder.api_key = "fake-key-for-test"
+    embedder.model = "gemini-embedding-001"
+    embedder.dimension = 4
+    embedder.task_type = "RETRIEVAL_DOCUMENT"
+
+    request = embedder._build_request(["a", "b"])
+    assert request == {
+        "model": "gemini-embedding-001",
+        "contents": ["a", "b"],
+        "config": {"task_type": "RETRIEVAL_DOCUMENT", "output_dimensionality": 4},
+    }
+
+    # dict-shaped response (as used in tests / a plain JSON reply)
+    parsed = embedder._parse_response({"embeddings": [{"values": [0.1, 0.2]}, {"values": [0.3, 0.4]}]})
+    assert parsed == [[0.1, 0.2], [0.3, 0.4]]
+
+    with pytest.raises(ValueError):
+        embedder._parse_response({})
+
+
+def test_gemini_embedder_parses_sdk_style_response_objects(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    embedder = GeminiEmbedder.__new__(GeminiEmbedder)
+
+    response = SimpleNamespace(embeddings=[SimpleNamespace(values=[0.5, 0.6])])
+    parsed = embedder._parse_response(response)
+    assert parsed == [[0.5, 0.6]]

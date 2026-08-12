@@ -18,6 +18,10 @@ chromadb>=1.5
 voyageai>=0.3
 anthropic>=0.40
 
+# EMBEDDER_BACKEND=gemini and/or LLM_BACKEND=gemini (POC/무료 AI Studio 키로
+# 테스트할 때). Same lazy-import pattern -- only needed when actually selected.
+google-genai>=1.0
+
 # Dev/test
 pytest>=9
 httpx>=0.28

@@ -42,6 +42,17 @@ cp .env.example .env
 uvicorn api.main:app --reload
 ```
 
+**무료로 POC만 해보고 싶다면** `ANTHROPIC_API_KEY`/`VOYAGE_API_KEY` 없이 Google AI
+Studio의 무료 Gemini 키 하나로도 돌릴 수 있습니다:
+```
+LLM_BACKEND=gemini
+EMBEDDER_BACKEND=gemini
+GEMINI_API_KEY=<AI Studio에서 발급받은 키>
+```
+(무료 등급은 분당/일별 요청 수 제한이 있으니, 대량 문서 재색인이나 반복 질의를
+많이 돌리면 제한에 걸릴 수 있습니다.) 나중에 실제 운영 단계로 넘어갈 땐 위
+두 값만 `anthropic`/`voyage`로 되돌리면 됩니다 — 코드 변경은 필요 없습니다.
+
 시드 데이터(고령투자자 랩상품 시나리오)를 채우려면:
 
 ```python
@@ -136,8 +147,14 @@ curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO J
 | `CHROMA_PERSIST_DIR` | `./data/chroma` | Chroma 영속 경로 |
 | `GRAPH_STORE_BACKEND` | `memory` | `memory` \| `kuzu` |
 | `KUZU_DB_PATH` | `./data/graph.kuzu` | Kuzu DB 파일 경로 |
-| `EMBEDDER_BACKEND` | `hash` | `hash`(더미) \| `voyage` |
+| `EMBEDDER_BACKEND` | `hash` | `hash`(더미) \| `voyage` \| `gemini` |
 | `VOYAGE_API_KEY` | - | `EMBEDDER_BACKEND=voyage`일 때 필수 |
+| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | `EMBEDDER_BACKEND=gemini`일 때 사용할 모델 |
+| `GEMINI_EMBED_DIMENSION` | `768` | `EMBEDDER_BACKEND=gemini`일 때 Matryoshka 축소 차원(기본 3072보다 작게) |
+| `LLM_BACKEND` | `anthropic` | `anthropic` \| `gemini` — `/chat`이 실제로 호출할 LLM 벤더 |
+| `ANTHROPIC_API_KEY` | - | `LLM_BACKEND=anthropic`일 때 필수 |
+| `GEMINI_API_KEY` | - | `LLM_BACKEND=gemini` 또는 `EMBEDDER_BACKEND=gemini`일 때 필수 (Google AI Studio에서 무료로 발급) |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | `LLM_BACKEND=gemini`일 때 사용할 모델 |
 | `AUDIT_LOG_PATH` | `./data/audit.jsonl` | 감사로그 경로 |
 | `SSO_JWT_ALGORITHM` | - | `HS256` \| `RS256`. 미설정 시 서버는 모든 `/chat` 요청을 501로 거부(fail-closed) |
 | `SSO_JWT_SECRET` | - | `HS256`일 때 필수 |

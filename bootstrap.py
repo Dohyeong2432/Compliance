@@ -2,8 +2,11 @@
 
 Defaults to fully in-memory, dependency-light backends so the app can run
 with zero configuration for local development and tests. Set
-VECTOR_STORE_BACKEND=chroma / GRAPH_STORE_BACKEND=kuzu / EMBEDDER_BACKEND=voyage
-to switch to the persistent/production backends.
+VECTOR_STORE_BACKEND=chroma / GRAPH_STORE_BACKEND=kuzu /
+EMBEDDER_BACKEND=voyage|gemini to switch to the persistent/production
+backends. LLM_BACKEND (anthropic|gemini) is read separately, in
+api/main.py, since the LLM client is constructed per-process there rather
+than as part of AppComponents.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ except ImportError:
 
 from agent.audit import AuditLogger
 from agent.sso import SSOConfig
-from knowledge.embedder import Embedder, HashEmbedder, VoyageEmbedder
+from knowledge.embedder import Embedder, GeminiEmbedder, HashEmbedder, VoyageEmbedder
 from knowledge.graph_store import GraphStore, KuzuGraphStore, NetworkXGraphStore
 from knowledge.retriever import HybridRetriever
 from knowledge.vector_store import ChromaVectorStore, InMemoryVectorStore, VectorStore
@@ -58,6 +61,11 @@ def _build_embedder() -> Embedder:
         return HashEmbedder()
     if backend == "voyage":
         return VoyageEmbedder(model=os.environ.get("VOYAGE_MODEL", "voyage-3"))
+    if backend == "gemini":
+        return GeminiEmbedder(
+            model=os.environ.get("GEMINI_EMBED_MODEL", "gemini-embedding-001"),
+            dimension=int(os.environ.get("GEMINI_EMBED_DIMENSION", "768")),
+        )
     raise RuntimeError(f"Unknown EMBEDDER_BACKEND: {backend}")
 
 
