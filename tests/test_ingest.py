@@ -158,6 +158,31 @@ def test_embed_cache_hit_still_upserts_vector_store():
     assert "law:l1" in {m.entity_id for m in results}
 
 
+def test_embed_cache_invalidated_when_model_changes(tmp_path):
+    """GEMINI_EMBED_MODEL을 001에서 002로 바꾸는 것처럼 임베더 자체를
+    바꾸면, 내용이 그대로인 문서도 예전 모델로 만든 벡터를 캐시에서 그냥
+    재사용하면 안 된다 -- 서로 다른 모델의 벡터는 같은 벡터공간이 아니라
+    코사인 유사도 비교가 무의미해진다."""
+    cache_path = tmp_path / "cache.json"
+
+    class ModelA(CountingEmbedder):
+        model = "gemini-embedding-001"
+
+    class ModelB(CountingEmbedder):
+        model = "gemini-embedding-002"
+
+    embedder_a = ModelA()
+    pipeline_a = IngestPipeline(embedder_a, InMemoryVectorStore(), NetworkXGraphStore(), embed_cache_path=cache_path)
+    pipeline_a.ingest_documents([_doc()])
+    assert embedder_a.embedded_texts == ["법령\n법령 본문"]
+
+    embedder_b = ModelB()
+    pipeline_b = IngestPipeline(embedder_b, InMemoryVectorStore(), NetworkXGraphStore(), embed_cache_path=cache_path)
+    pipeline_b.ingest_documents([_doc()])  # 내용은 동일하지만 모델이 바뀌었으니 다시 임베딩해야 함
+
+    assert embedder_b.embedded_texts == ["법령\n법령 본문"]
+
+
 def test_no_embed_cache_path_means_every_ingest_recomputes():
     embedder = CountingEmbedder()
     pipeline = IngestPipeline(embedder, InMemoryVectorStore(), NetworkXGraphStore(), embed_cache_path=None)

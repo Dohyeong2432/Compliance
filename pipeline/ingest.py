@@ -32,6 +32,14 @@ class IngestPipeline:
     those are cheap local upserts, and an in-memory VectorStore has nothing
     to reuse across a process restart even when the embedding itself was
     cached.
+
+    The cache key also folds in the embedder's class/model/dimension (see
+    _embed_identity below), not just the text content -- switching
+    GEMINI_EMBED_MODEL (e.g. 001 -> 002) or GEMINI_EMBED_DIMENSION mid-project
+    must not let an unchanged document quietly keep serving a vector from the
+    old model out of the cache, since vectors from two different models
+    aren't comparable in the same vector space. Changing the embedder
+    automatically busts the whole cache.
     """
 
     def __init__(
@@ -46,6 +54,12 @@ class IngestPipeline:
         self.graph_store = graph_store
         self.embed_cache_path = Path(embed_cache_path) if embed_cache_path else None
         self._embed_cache: dict[str, dict[str, Any]] = self._load_embed_cache()
+        # 캐시 히트 판정에 이 값을 텍스트와 함께 해시해 넣는다 -- GEMINI_EMBED_MODEL을
+        # 001에서 002로 바꾸는 것처럼 임베더의 모델/차원을 바꾸면, 내용이 안 바뀐
+        # 문서라도 예전 모델로 만든 벡터가 캐시에서 그대로 재사용돼 새 모델 벡터와
+        # 섞여버린다(둘은 서로 다른 벡터공간이라 코사인 유사도 비교 자체가 무의미해짐).
+        # 모델/차원이 바뀌면 이 식별자도 바뀌어서 모든 캐시가 자동으로 무효화된다.
+        self._embed_identity = f"{type(embedder).__name__}:{getattr(embedder, 'model', '')}:{getattr(embedder, 'dimension', '')}"
 
     def _load_embed_cache(self) -> dict[str, dict[str, Any]]:
         if self.embed_cache_path is None or not self.embed_cache_path.exists():
@@ -65,7 +79,9 @@ class IngestPipeline:
         if self.embed_cache_path is None:
             return self.embedder.embed(texts)
 
-        hashes = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
+        hashes = [
+            hashlib.sha256(f"{self._embed_identity}\n{text}".encode("utf-8")).hexdigest() for text in texts
+        ]
         vectors: list[Vector | None] = [None] * len(entities)
         stale_indices = [
             i
