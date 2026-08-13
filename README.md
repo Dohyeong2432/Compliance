@@ -158,6 +158,40 @@ connector = LawConnector(fetch_items=crawl_law_items)
 curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO JWT>"
 ```
 
+## Windows PowerShell에서 테스트할 때 한글이 깨지는 문제
+
+`curl` 대신 Windows PowerShell의 `Invoke-RestMethod`로 `/chat`을 테스트하면 한글이
+두 군데에서 깨질 수 있습니다 — 원인이 서로 달라서 둘 다 고쳐야 합니다.
+
+**1) 보낸 질문 자체가 깨져서 서버에 도착하는 경우** (답변이 "질문이 깨져서
+전달됐다"는 식으로 옴): `Invoke-RestMethod -Body <문자열>`이 body를 UTF-8이 아닌
+다른 인코딩으로 보내는 게 원인입니다. body를 UTF-8 바이트로 직접 변환해서
+넘기세요:
+```powershell
+$bodyJson = @{ message = "질문 내용" } | ConvertTo-Json
+$bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+
+Invoke-RestMethod -Uri "http://localhost:8000/chat" -Method Post `
+  -Headers @{ Authorization = "Bearer <SSO JWT>" } `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $bodyBytes
+```
+
+**2) 요청/답변은 정상인데 콘솔에 출력할 때만 깨지는 경우**: PowerShell 콘솔의
+출력 인코딩이 UTF-8이 아니라서 그렇습니다. 아래 세 줄을 PowerShell 프로필
+(`notepad $PROFILE` — 파일/폴더가 없으면 `New-Item -ItemType Directory -Path
+(Split-Path $PROFILE) -Force`로 폴더부터 만든 뒤 다시 시도)에 넣어두면 새
+PowerShell 창을 열 때마다 자동 적용됩니다:
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 > $null
+```
+프로필 스크립트 자체가 실행 정책에 막혀 로드가 안 되면(`이 시스템에서 스크립트를
+실행할 수 없으므로...` 에러), `Set-ExecutionPolicy -Scope CurrentUser
+-ExecutionPolicy RemoteSigned`로 사용자 범위 정책을 한 번 바꿔두세요(관리자 권한
+불필요, 이후 세션에 계속 적용됨).
+
 ## 환경변수
 
 | 변수 | 기본값 | 설명 |
