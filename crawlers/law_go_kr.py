@@ -33,7 +33,7 @@ fetch_law_item_by_name()을 직접 호출하세요.
 
 pipeline.connectors.law.LawConnector(fetch_items=...)에 연결하려면:
     LAW_CRAWLER=crawlers.law_go_kr:crawl_watchlist_items_incremental
-(law_watchlist.LAW_WATCHLIST 164개만, 공포일자/발령일자가 안 바뀐 건 상세
+(law_watchlist.LAW_WATCHLIST 164개만, 시행일자가 안 바뀐 건 상세
 페이지를 다시 열지 않는 증분 버전 -- 매 사이클 164개를 전부 여는
 crawl_watchlist_items()보다 이쪽을 기본으로 권장합니다. 전체 법령/행정규칙을
 훑는 crawl_law_items()도 있지만 아직 실사이트 미검증입니다.)
@@ -78,6 +78,18 @@ _COLUMN_NAMES = {
     "law": ("법령명", "공포일자"),
     "reg": ("행정규칙명", "발령일자"),
 }
+
+# watchlist 증분 크롤링(_watchlist_date_lookup)에서 "바뀌었는지" 판단할 때 쓰는
+# 컬럼. 공포일자/발령일자는 "발표된 날", 시행일자는 "실제로 적용되는 날"이라
+# 실무 안전을 위해 시행일자를 기준으로 삼는다 -- 목록 테이블엔 공포/발령과
+# 동시에 시행일자도 이미 나와 있어서(law/reg 양쪽 실제 검색 결과 HTML로 확인),
+# 시행일자를 기준으로 바꿔도 변경 감지가 공포일자 기준보다 늦어지지 않는다.
+# crawl_listing()/crawl_law_items()의 페이지 넘김 중단 로직은 그대로
+# 공포일자/발령일자를 쓴다 -- 그쪽은 목록이 공포일자/발령일자 내림차순으로
+# 정렬되어 있다는 전제로 "날짜가 오래되면 그만 넘긴다"고 판단하는데, 시행일자는
+# 공포일자와 정렬 순서가 어긋날 수 있어(예: 먼저 공포된 개정이 나중에 공포된
+# 개정보다 시행일이 늦을 수 있음) 그 전제를 깨뜨릴 위험이 있다.
+_EFFECTIVE_DATE_COLUMN = "시행일자"
 
 
 def get_browser() -> webdriver.Chrome:
@@ -622,13 +634,13 @@ def crawl_watchlist_items(
 
 
 # ---------------------------------------------------------------------------
-# 증분 크롤링: 상세 페이지를 열기 전에, 이미 검증된 crawl_listing()으로
-# 공포일자/발령일자가 지난번과 같은지부터 저렴하게 확인한다.
+# 증분 크롤링: 상세 페이지를 열기 전에, _watchlist_date_lookup()으로 시행일자가
+# 지난번과 같은지부터 저렴하게 확인한다.
 #
 # 상세 페이지(본문 파싱)를 여는 게 이 크롤러에서 제일 비싼 부분이다 --
 # crawl_watchlist_items()는 164개를 매번 전부 연다. 반면 목록 테이블에는
-# 상세 페이지를 열지 않고도 공포일자/발령일자가 이미 나와 있으므로, 그
-# 날짜가 지난번과 같으면 본문이 안 바뀌었다고 보고 상세 페이지를 건너뛴다.
+# 상세 페이지를 열지 않고도 시행일자가 이미 나와 있으므로, 그 날짜가
+# 지난번과 같으면 본문이 안 바뀌었다고 보고 상세 페이지를 건너뛴다.
 #
 # 주의: pipeline.sync.IngestSyncer는 매 사이클 fetch_items()가 반환한
 # id 전체를 "현재 상태"로 보고, 거기 없는 id는 "소스에서 사라졌다"고
@@ -641,7 +653,7 @@ def crawl_watchlist_items(
 
 
 def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[str, str]:
-    """watchlist 이름별 현재 공포일자/발령일자를 상세 페이지 없이 확인한다.
+    """watchlist 이름별 현재 시행일자를 상세 페이지 없이 확인한다.
 
     처음엔 law -> reg 순으로 전체 목록을 한 번씩 훑어서 한 번의 순회로
     모든 이름의 날짜를 확인했는데, 이건 law.go.kr에 등록된 전체 건수(수천~
@@ -650,15 +662,16 @@ def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[
     164개뿐이라도, 그 164개를 위해 훨씬 많은 전체 목록을 다 훑는 건 배보다
     배꼽이 컸음). open_law_detail_by_name()과 동일하게 이름별로 law.go.kr
     자체 검색(query=)을 써서, 상세 페이지는 열지 않고 검색 결과 첫 페이지의
-    공포일자/발령일자만 저렴하게 읽는다. law -> reg 순으로 시도하고(law에서
-    이미 찾았으면 reg는 보지 않음), 여러 건이 매치되면(개정 이력 등) 가장
-    최근 날짜를 취한다.
+    시행일자만 저렴하게 읽는다(_EFFECTIVE_DATE_COLUMN 주석 참고 -- 공포일자/
+    발령일자 대신 시행일자를 기준으로 삼는 이유). law -> reg 순으로 시도하고
+    (law에서 이미 찾았으면 reg는 보지 않음), 여러 건이 매치되면(개정 이력 등)
+    가장 최근 날짜를 취한다.
     """
     normalized_targets = {re.sub(r"[^가-힣]", "", n).strip(): n for n in names}
     found: dict[str, str] = {}
 
     for site_category in ("law", "reg"):
-        name_col, date_col = get_column_name(site_category)
+        name_col, _ = get_column_name(site_category)
         for normalized, original_name in normalized_targets.items():
             if original_name in found:
                 continue
@@ -666,14 +679,14 @@ def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[
             move_to_home(browser, site_category, query=original_name)
             time.sleep(0.5)
             table_df = _parse_listing_table(bs(browser.page_source, "html.parser"))
-            if table_df.empty or name_col not in table_df or date_col not in table_df:
+            if table_df.empty or name_col not in table_df or _EFFECTIVE_DATE_COLUMN not in table_df:
                 continue
 
             normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
             matches = table_df[normalized_col == normalized]
             if matches.empty:
                 continue
-            dates = pd.to_datetime(matches[date_col], errors="coerce").dropna()
+            dates = pd.to_datetime(matches[_EFFECTIVE_DATE_COLUMN], errors="coerce").dropna()
             if not dates.empty:
                 found[original_name] = dates.max().strftime("%Y-%m-%d")
 
@@ -704,7 +717,7 @@ def crawl_watchlist_items_incremental(
     연결되는, crawl_watchlist_items()의 증분 버전. 반환 스키마는 동일하다.
 
     이름마다 무조건 상세 페이지를 여는 대신, _watchlist_date_lookup()으로
-    공포일자/발령일자가 지난번(state_path에 저장된 값)과 같은지 먼저 본다.
+    시행일자가 지난번(state_path에 저장된 값)과 같은지 먼저 본다.
     같으면 상세 페이지를 열지 않고 지난번 파싱 결과를 그대로 재사용하고,
     다르거나(개정/공포) 처음 보는 이름이면 그때만 상세 페이지를 연다.
     상세 페이지 크롤링이 실패해도 지난번 캐시가 있으면 그걸 대신 반환한다

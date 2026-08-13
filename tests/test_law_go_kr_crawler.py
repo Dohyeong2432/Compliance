@@ -297,12 +297,20 @@ def test_crawl_watchlist_items_defaults_to_law_watchlist(monkeypatch):
 # _watchlist_date_lookup / crawl_watchlist_items_incremental
 # ---------------------------------------------------------------------------
 
-def _listing_html(name_col: str, date_col: str, rows: list[tuple[str, str]]) -> str:
-    """_parse_listing_table이 파싱할 수 있는 최소한의 목록 테이블 HTML."""
-    trs = "\n".join(f"<tr><td>{i + 1}</td><td>{name}</td><td>{date}</td></tr>" for i, (name, date) in enumerate(rows))
+def _listing_html(name_col: str, rows: list[tuple[str, str]], other_date_col: str = "공포일자") -> str:
+    """_parse_listing_table이 파싱할 수 있는 최소한의 목록 테이블 HTML.
+
+    other_date_col(공포일자/발령일자)과 시행일자를 둘 다 넣어, 실제 페이지처럼
+    두 날짜가 같이 나오는 상황을 흉내낸다 -- _watchlist_date_lookup은 이제
+    시행일자만 읽으므로, other_date_col 값은 "다른 컬럼도 있지만 무시된다"는
+    걸 보여주는 용도로 시행일자와 다른 값을 넣어둔다."""
+    trs = "\n".join(
+        f"<tr><td>{i + 1}</td><td>{name}</td><td>9999.12.31.</td><td>{date}</td></tr>"
+        for i, (name, date) in enumerate(rows)
+    )
     return f"""
     <table>
-    <tr><th scope="col">번호</th><th scope="col">{name_col}</th><th scope="col">{date_col}</th></tr>
+    <tr><th scope="col">번호</th><th scope="col">{name_col}</th><th scope="col">{other_date_col}</th><th scope="col">시행일자</th></tr>
     {trs}
     </table>
     """
@@ -311,20 +319,24 @@ def _listing_html(name_col: str, date_col: str, rows: list[tuple[str, str]]) -> 
 def test_watchlist_date_lookup_prefers_law_over_reg_and_picks_latest_date(monkeypatch):
     """전체 목록을 한 번씩 훑는 대신, 이제 이름별로 law.go.kr 검색(query=)
     결과를 하나씩 확인한다 -- move_to_home이 호출될 때마다 그 site_category/
-    query에 맞는 검색 결과 HTML을 browser.page_source에 채워 넣어 흉내낸다."""
+    query에 맞는 검색 결과 HTML을 browser.page_source에 채워 넣어 흉내낸다.
+
+    시행일자를 기준으로 비교한다는 걸 확실히 하려고, 각 행의 공포일자/
+    발령일자는 일부러 시행일자와 동떨어진 값(9999.12.31.)으로 채워뒀다 --
+    그 값이 결과에 나오면 시행일자 대신 공포일자/발령일자를 읽고 있다는 뜻."""
     law_results = {
-        "개인정보보호법": _listing_html("법령명", "공포일자", [("개인정보보호법", "2023.01.01."), ("개인정보보호법", "2024.06.15.")]),
-        "은행법": _listing_html("법령명", "공포일자", [("은행법", "2022.03.01.")]),
-        "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html("법령명", "공포일자", []),
-        "존재하지않는법": _listing_html("법령명", "공포일자", []),
+        "개인정보보호법": _listing_html("법령명", [("개인정보보호법", "2023.01.01."), ("개인정보보호법", "2024.06.15.")]),
+        "은행법": _listing_html("법령명", [("은행법", "2022.03.01.")]),
+        "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html("법령명", []),
+        "존재하지않는법": _listing_html("법령명", []),
     }
     reg_results = {
-        "개인정보보호법": _listing_html("행정규칙명", "발령일자", [("개인정보보호법", "2099.01.01.")]),
-        "은행법": _listing_html("행정규칙명", "발령일자", []),
+        "개인정보보호법": _listing_html("행정규칙명", [("개인정보보호법", "2099.01.01.")], other_date_col="발령일자"),
+        "은행법": _listing_html("행정규칙명", [], other_date_col="발령일자"),
         "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html(
-            "행정규칙명", "발령일자", [("자금세탁방지및공중협박자금조달금지에관한업무규정", "2021.05.05.")]
+            "행정규칙명", [("자금세탁방지및공중협박자금조달금지에관한업무규정", "2021.05.05.")], other_date_col="발령일자"
         ),
-        "존재하지않는법": _listing_html("행정규칙명", "발령일자", []),
+        "존재하지않는법": _listing_html("행정규칙명", [], other_date_col="발령일자"),
     }
 
     browser = MagicMock()
