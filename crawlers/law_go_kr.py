@@ -72,8 +72,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 _URLS = {
-    "law": "https://www.law.go.kr/lsSc.do?menuId=1&subMenuId=23&tabMenuId=121&query=",
-    "reg": "https://www.law.go.kr/admRulSc.do?menuId=5&subMenuId=45&tabMenuId=203&query=",
+    # 사용자가 실제 "금융지주회사법" 페이지 HTML로 확인: 이 페이지 자신의 JS
+    # 상태(var subMenuId='15'; tabMenuId='81';)와 상단 내비게이션의
+    # "법령(법률·대통령령·부령)" 링크가 가리키는 subMenuId=15&tabMenuId=81이
+    # "현행법령" 탭이다. 예전 subMenuId=23&tabMenuId=121은 같은 페이지 안의
+    # 사이드바에 "최신법령"이라는 별도 탭으로 명시적으로 라벨링돼 있었다 --
+    # 최근 개정/공포된 것 위주로 보여주는 다른 검색 범위라, 오래돼서 최근
+    # 손 안 댄 법령은 여기서 이름 검색으로 아예 안 걸릴 위험이 있다.
+    # open_law_detail_by_name()/_watchlist_date_lookup()이 필요한 건
+    # "지금 유효한 법령을 이름으로 찾기"이므로 현행법령 탭이 맞다.
+    "law": "https://www.law.go.kr/lsSc.do?menuId=1&subMenuId=15&tabMenuId=81&query=",
+    # 같은 HTML의 상단 내비게이션 "행정규칙(훈령·예규·고시)" 링크가 가리키는
+    # subMenuId=41&tabMenuId=183 -- 법령 쪽 "법령(법률·대통령령·부령)" ==
+    # 현행법령 링크와 동일한 성격(그 섹션의 기본/현행 진입점)이라 위와
+    # 같은 이유로 이쪽으로 바꿨다.
+    "reg": "https://www.law.go.kr/admRulSc.do?menuId=5&subMenuId=41&tabMenuId=183&query=",
 }
 _COLUMN_NAMES = {
     "law": ("법령명", "공포일자"),
