@@ -96,7 +96,7 @@ class GeminiLLMClient(LLMClient):
     installed -- only __init__ and generate() touch the actual SDK client.
     """
 
-    def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None, max_output_tokens: int = 2048):
+    def __init__(self, model: str = "gemini-3.6-flash", api_key: str | None = None, max_output_tokens: int = 2048):
         api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set; cannot construct GeminiLLMClient")

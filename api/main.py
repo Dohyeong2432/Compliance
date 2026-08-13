@@ -75,7 +75,7 @@ def _build_llm_client() -> LLMClient:
     if backend == "anthropic":
         return AnthropicLLMClient()
     if backend == "gemini":
-        return GeminiLLMClient(model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+        return GeminiLLMClient(model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"))
     raise RuntimeError(f"Unknown LLM_BACKEND: {backend}")
 
 

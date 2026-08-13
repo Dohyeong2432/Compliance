@@ -174,7 +174,7 @@ curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO J
 | `LLM_BACKEND` | `anthropic` | `anthropic` \| `gemini` — `/chat`이 실제로 호출할 LLM 벤더 |
 | `ANTHROPIC_API_KEY` | - | `LLM_BACKEND=anthropic`일 때 필수 |
 | `GEMINI_API_KEY` | - | `LLM_BACKEND=gemini` 또는 `EMBEDDER_BACKEND=gemini`일 때 필수 (Google AI Studio에서 무료로 발급) |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | `LLM_BACKEND=gemini`일 때 사용할 모델 |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | `LLM_BACKEND=gemini`일 때 사용할 모델. Gemini 쪽은 모델이 자주 폐기/교체되니, `404 ... no longer available` 에러가 나면 [AI Studio](https://aistudio.google.com) 모델 목록에서 현재 쓸 수 있는 이름으로 갱신하세요 |
 | `EMBED_CACHE_PATH` | `./data/embed_cache.json` | 문서 내용이 안 바뀌면 재색인 때 임베딩 API 재호출을 건너뛰는 캐시 경로. 빈 값이면 매번 재임베딩 |
 | `AUDIT_LOG_PATH` | `./data/audit.jsonl` | 감사로그 경로 |
 | `SSO_JWT_ALGORITHM` | - | `HS256` \| `RS256`. 미설정 시 서버는 모든 `/chat` 요청을 501로 거부(fail-closed) |
