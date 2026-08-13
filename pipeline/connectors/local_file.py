@@ -83,6 +83,14 @@ def _extract_text(path: Path) -> str:
             f"{path.name}: {suffix} parser failed (exit {exc.returncode}): "
             f"{exc.stderr.strip() if exc.stderr else 'no stderr'}"
         ) from exc
+    except OSError as exc:
+        # e.g. the parser binary itself isn't installed/on PATH (catdoc is
+        # the common case -- .doc support is optional, see crawlers/README
+        # for the LibreOffice-conversion alternative). This must stay a
+        # per-file skip like CalledProcessError above, not a hard failure --
+        # one file needing a tool that isn't installed shouldn't block
+        # ingesting every other file in the batch.
+        raise UnparsableDocumentError(f"{path.name}: {suffix} parser ('{exc.filename}') not available: {exc}") from exc
     if not result.stdout.strip():
         raise UnparsableDocumentError(f"{path.name}: parser produced no text (possibly encrypted/corrupted)")
     return result.stdout

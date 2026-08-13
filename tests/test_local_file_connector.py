@@ -82,6 +82,38 @@ def test_fetch_converts_docx_and_skips_unparsable_file(tmp_path, require_pandoc)
     assert connector.errors[0][0].name == "2. 깨진 파일.docx"
 
 
+def test_fetch_skips_file_when_parser_binary_is_missing(tmp_path, require_pandoc, monkeypatch):
+    """catdoc(.doc)/pdftotext(.pdf) 등 파서 프로그램 자체가 PATH에 없으면
+    subprocess.run이 FileNotFoundError(OSError)를 던진다 -- 이것도
+    CalledProcessError처럼 그 파일만 건너뛰고 나머지는 계속 처리해야 한다."""
+    md = tmp_path / "source.md"
+    md.write_text("정상 문서 제목\n\n본문 내용입니다.", encoding="utf-8")
+    good_docx = tmp_path / "1. 정상 문서.docx"
+    subprocess.run(["pandoc", str(md), "-o", str(good_docx)], check=True)
+
+    (tmp_path / "2. 구버전 문서.doc").write_bytes(b"legacy doc content, irrelevant to this test")
+
+    import pipeline.connectors.local_file as local_file_module
+
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if args[0] == "catdoc":
+            raise FileNotFoundError(2, "지정된 파일을 찾을 수 없습니다", "catdoc")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(local_file_module.subprocess, "run", fake_run)
+
+    connector = LocalFileRegulationConnector(str(tmp_path))
+    docs = connector.fetch()
+
+    assert len(docs) == 1
+    assert docs[0].external_id == "1"
+    assert len(connector.errors) == 1
+    assert connector.errors[0][0].name == "2. 구버전 문서.doc"
+    assert "catdoc" in connector.errors[0][1]
+
+
 def test_fetch_ignores_unsupported_extensions(tmp_path):
     (tmp_path / "notes.txt").write_text("무시되어야 함", encoding="utf-8")
     connector = LocalFileRegulationConnector(str(tmp_path))
