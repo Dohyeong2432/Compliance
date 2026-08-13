@@ -65,6 +65,7 @@ def _build_embedder() -> Embedder:
         return GeminiEmbedder(
             model=os.environ.get("GEMINI_EMBED_MODEL", "gemini-embedding-001"),
             dimension=int(os.environ.get("GEMINI_EMBED_DIMENSION", "768")),
+            batch_size=int(os.environ.get("GEMINI_EMBED_BATCH_SIZE", "10")),
         )
     raise RuntimeError(f"Unknown EMBEDDER_BACKEND: {backend}")
 

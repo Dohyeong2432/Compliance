@@ -97,3 +97,34 @@ def test_gemini_embedder_parses_sdk_style_response_objects(monkeypatch):
     response = SimpleNamespace(embeddings=[SimpleNamespace(values=[0.5, 0.6])])
     parsed = embedder._parse_response(response)
     assert parsed == [[0.5, 0.6]]
+
+
+def test_gemini_embedder_splits_large_input_into_batches():
+    """대량 문서를 한 번에 embed()에 넘겨도 batch_size 단위로 쪼개서 여러 번
+    호출해야 한다 -- 한 번의 요청이 너무 크면(대량의 사규 문서 등) 무료
+    등급 할당량을 하나의 요청만으로 다 써버릴 수 있다."""
+
+    class FakeModels:
+        def __init__(self):
+            self.calls: list[list[str]] = []
+
+        def embed_content(self, model, contents, config):
+            self.calls.append(list(contents))
+            return {"embeddings": [{"values": [float(len(t))]} for t in contents]}
+
+    class FakeClient:
+        def __init__(self):
+            self.models = FakeModels()
+
+    embedder = GeminiEmbedder.__new__(GeminiEmbedder)
+    embedder.model = "gemini-embedding-001"
+    embedder.dimension = 4
+    embedder.task_type = "RETRIEVAL_DOCUMENT"
+    embedder.batch_size = 2
+    embedder._client = FakeClient()
+
+    texts = ["a", "bb", "ccc", "dddd", "e"]
+    vectors = embedder.embed(texts)
+
+    assert embedder._client.models.calls == [["a", "bb"], ["ccc", "dddd"], ["e"]]
+    assert vectors == [[1.0], [2.0], [3.0], [4.0], [1.0]]

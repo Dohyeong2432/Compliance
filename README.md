@@ -170,6 +170,7 @@ curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO J
 | `VOYAGE_API_KEY` | - | `EMBEDDER_BACKEND=voyage`일 때 필수 |
 | `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | `EMBEDDER_BACKEND=gemini`일 때 사용할 모델 |
 | `GEMINI_EMBED_DIMENSION` | `768` | `EMBEDDER_BACKEND=gemini`일 때 Matryoshka 축소 차원(기본 3072보다 작게) |
+| `GEMINI_EMBED_BATCH_SIZE` | `10` | 한 번의 임베딩 API 요청에 몰아 보낼 문서 수 상한 (무료 등급 한도 초과 방지) |
 | `LLM_BACKEND` | `anthropic` | `anthropic` \| `gemini` — `/chat`이 실제로 호출할 LLM 벤더 |
 | `ANTHROPIC_API_KEY` | - | `LLM_BACKEND=anthropic`일 때 필수 |
 | `GEMINI_API_KEY` | - | `LLM_BACKEND=gemini` 또는 `EMBEDDER_BACKEND=gemini`일 때 필수 (Google AI Studio에서 무료로 발급) |

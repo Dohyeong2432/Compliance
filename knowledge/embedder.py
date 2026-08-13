@@ -118,6 +118,15 @@ class GeminiEmbedder(Embedder):
     requests and validates the size actually returned. Same DEFAULT_MIN_SCORE
     recalibration caveat as VoyageEmbedder applies when switching to this
     embedder (see HashEmbedder docstring).
+
+    embed() sends texts in batches of at most batch_size rather than one
+    request for the whole list -- IngestPipeline can hand this dozens of
+    full-length regulation documents at once (e.g. on the first sync after
+    switching embedders, when the embed cache is cold), and one oversized
+    request is what actually trips the free-tier quota, not necessarily the
+    account's total usage. Splitting into smaller requests doesn't help if
+    the account's daily/per-minute quota itself is exhausted -- only a
+    request that's too large in one shot.
     """
 
     def __init__(
@@ -126,6 +135,7 @@ class GeminiEmbedder(Embedder):
         model: str = "gemini-embedding-001",
         dimension: int = 768,
         task_type: str = "RETRIEVAL_DOCUMENT",
+        batch_size: int = 10,
     ):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
@@ -133,6 +143,7 @@ class GeminiEmbedder(Embedder):
         self.model = model
         self.dimension = dimension
         self.task_type = task_type
+        self.batch_size = batch_size
         self._client = self._build_client()
 
     def _build_client(self):
@@ -161,6 +172,11 @@ class GeminiEmbedder(Embedder):
         return list(embedding.values)
 
     def embed(self, texts: Sequence[str]) -> list[Vector]:
-        request = self._build_request(texts)
-        response = self._client.models.embed_content(**request)
-        return self._parse_response(response)
+        texts = list(texts)
+        vectors: list[Vector] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            request = self._build_request(batch)
+            response = self._client.models.embed_content(**request)
+            vectors.extend(self._parse_response(response))
+        return vectors
