@@ -125,9 +125,17 @@ def get_last_page_number(browser: webdriver.Chrome, site_category: str, query: s
 
 
 def get_page_range(last_page_number: int) -> list[tuple[int, int]]:
-    """한 화면에 노출되는 5개 단위 페이지 구간 목록."""
+    """한 화면에 노출되는 5개 단위 페이지 구간 목록.
+
+    range()의 stop은 last_page_number + 1이어야 한다 -- last_page_number를
+    그대로 stop으로 쓰면(원래 코드) last_page_number가 정확히 새 5개 구간의
+    시작점과 같아지는 값(1, 6, 11, ...)에서 그 마지막 구간이 통째로
+    빠진다. 특히 last_page_number == 1(검색으로 결과가 딱 1페이지로
+    좁혀졌을 때, 즉 open_law_detail_by_name의 query= 검색 결과에서 흔한
+    경우)이면 결과가 아예 빈 리스트가 되어 그 유일한 페이지조차 한 번도
+    확인하지 못하고 "찾지 못했다"고 끝나버렸다."""
     ranges = []
-    for start in range(1, last_page_number, 5):
+    for start in range(1, last_page_number + 1, 5):
         end = min(start + 4, last_page_number)
         ranges.append((start, end))
     return ranges
@@ -156,6 +164,9 @@ def click_next_page(browser: webdriver.Chrome) -> None:
                 continue
 
 
+_UPCOMING_ALT = "앞으로 시행될 법령"
+
+
 def _parse_listing_table(page_source: bs) -> pd.DataFrame:
     """목록 테이블 한 페이지를 텍스트로 파싱 (원본 get_page_table_info와 동일).
 
@@ -163,7 +174,14 @@ def _parse_listing_table(page_source: bs) -> pd.DataFrame:
     실제로 동작하는 참고 코드(click_law_row)는 "번호" 컬럼 값으로 그 행을
     다시 찾아 안의 <a>를 살아있는 DOM에서 직접 클릭한다. 그래서 "번호"
     컬럼은 (다른 곳과 달리) 여기서 버리지 않는다 -- click_row_by_number가
-    쓴다."""
+    쓴다.
+
+    같은 법령이 개정될 때마다 목록에 별도 행으로 쌓이는데(예: 자본시장법
+    검색 시 현행 버전 + 이미 공포됐지만 아직 시행 전인 개정 버전이 둘 다
+    "정확히 일치"하는 행으로 나옴), law.go.kr는 아직 시행 전인 행에만
+    `<img alt="앞으로 시행될 법령">`을 붙여서 구분해준다(실제 검색 결과
+    HTML로 확인됨). open_law_detail_by_name()이 이 "_upcoming" 플래그로
+    현행 버전만 골라 클릭할 수 있도록 행마다 같이 뽑아둔다."""
     table_tag = page_source.find("table")
     if table_tag is None:
         return pd.DataFrame()
@@ -181,6 +199,7 @@ def _parse_listing_table(page_source: bs) -> pd.DataFrame:
             if text:
                 row[col_name] = text
         if row:
+            row["_upcoming"] = tr.find("img", attrs={"alt": _UPCOMING_ALT}) is not None
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -476,8 +495,12 @@ def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_n
     목록을 1페이지부터 끝까지 넘기며 찾는 것은 실사용해보니 감당하기 힘들
     정도로 느렸다(법령 목록이 최신순 정렬이라, 오래되고 개정이 뜸한 법령일수록
     한참 뒤 페이지에 있어 수십~수백 페이지를 넘겨야 했음). 검색 결과 안에서는
-    기존과 동일하게 페이지를 넘기며 정확히 일치하는 이름을 찾고, 동명이인이
-    있으면(제목이 같은 옛 버전 등) 번호가 가장 큰(=가장 최근) 행을 선택한다.
+    기존과 동일하게 페이지를 넘기며 정확히 일치하는 이름을 찾는다.
+
+    같은 이름으로 여러 행이 나올 수 있다(현행 버전 + 이미 공포됐지만 아직
+    시행 전인 개정 버전) -- `_upcoming` 플래그로 아직 시행 전인 행은 제외하고
+    현행 버전을 우선 선택한다(실제 검색 결과에서 확인된 동작). 그러고도
+    여러 행이 남으면(동명이인 등) 번호가 가장 큰 행을 선택한다.
     """
     normalized_target = re.sub(r"[^가-힣]", "", law_name).strip()
     name_col, date_col = get_column_name(site_category)
@@ -497,6 +520,10 @@ def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_n
                 normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
                 matches = table_df[normalized_col == normalized_target]
                 if not matches.empty:
+                    if "_upcoming" in matches:
+                        current_matches = matches[~matches["_upcoming"]]
+                        if not current_matches.empty:
+                            matches = current_matches
                     row_number = int(matches["번호"].astype(int).max())
                     click_row_by_number(browser, row_number)
                     wait_for_detail_page(browser, law_name)

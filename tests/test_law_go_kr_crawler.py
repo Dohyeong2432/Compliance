@@ -12,8 +12,10 @@ from crawlers.law_go_kr import (
     crawl_watchlist_items,
     crawl_watchlist_items_incremental,
     get_last_page_number,
+    get_page_range,
     law_detail_to_items,
     move_to_home,
+    open_law_detail_by_name,
     open_law_or_reg_detail_by_name,
     parse_law_body_html,
     wait_for_detail_page,
@@ -475,3 +477,116 @@ def test_get_last_page_number_resets_to_the_same_query_not_the_full_listing(monk
     get_last_page_number(browser, "law", query="은행법")
 
     assert calls == ["은행법"]
+
+
+# ---------------------------------------------------------------------------
+# _parse_listing_table의 _upcoming 플래그 / open_law_detail_by_name의 현행
+# 버전 우선 선택: 같은 법령명이 "시행 예정" 개정 + "현행" 버전 두 행으로
+# 검색 결과에 함께 나오는 실제 사례(자본시장과 금융투자업에 관한 법률)를
+# 실제 검색 결과 HTML로 확인해서 반영한 것.
+# ---------------------------------------------------------------------------
+
+_LISTING_HTML_WITH_UPCOMING_AND_CURRENT_ROWS = """
+<table>
+<tr><th scope="col">번호</th><th scope="col">법령명</th><th scope="col">공포일자</th></tr>
+<tr>
+  <td>4</td>
+  <td>
+    <a href="#" onclick="lsViewWideAll('285957','20261113','liBgcolor3',$(this),'2','0','Y','81');">
+      <span class="tx">4. <img src="/LSW/images/common/bul_list1.gif" alt="앞으로 시행될 법령" style="padding-right:3px;">&nbsp;자본시장과 금융투자업에 관한 법률</span>
+      <span class="tx2">[시행 2026. 11. 13.] [법률 제21647호, 2026. 5. 12., 일부개정]</span>
+    </a>
+  </td>
+  <td>2026.05.12</td>
+</tr>
+<tr>
+  <td>5</td>
+  <td>
+    <a href="#" onclick="lsViewWideAll('283193','20260804','liBgcolor4',$(this),'3','0','Y','81');">
+      <span class="tx">5. &nbsp;자본시장과 금융투자업에 관한 법률</span>
+      <span class="tx2">[시행 2026. 8. 4.] [법률 제21324호, 2026. 2. 3., 일부개정]</span>
+    </a>
+  </td>
+  <td>2026.02.03</td>
+</tr>
+</table>
+"""
+
+
+def test_parse_listing_table_flags_upcoming_rows_via_alt_image():
+    from bs4 import BeautifulSoup as bs
+
+    table_df = law_go_kr._parse_listing_table(bs(_LISTING_HTML_WITH_UPCOMING_AND_CURRENT_ROWS, "html.parser"))
+
+    upcoming_row = table_df[table_df["번호"] == "4"].iloc[0]
+    current_row = table_df[table_df["번호"] == "5"].iloc[0]
+    assert bool(upcoming_row["_upcoming"]) is True
+    assert bool(current_row["_upcoming"]) is False
+
+
+def test_open_law_detail_by_name_prefers_non_upcoming_row_when_names_match(monkeypatch):
+    """실제 검색 결과처럼 같은 법령명이 두 행(시행 예정 + 현행)으로 나올 때,
+    시행 예정(_upcoming=True) 대신 현행 쪽을 클릭해야 한다."""
+    df = pd.DataFrame(
+        {
+            "번호": ["4", "5"],
+            "법령명": ["자본시장과 금융투자업에 관한 법률", "자본시장과 금융투자업에 관한 법률"],
+            "_upcoming": [True, False],
+        }
+    )
+
+    monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
+    monkeypatch.setattr(law_go_kr, "_goto_page_with_retry", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "_wait_for_fresh_table", lambda *a, **k: df)
+    monkeypatch.setattr(law_go_kr, "wait_for_detail_page", lambda *a, **k: None)
+
+    clicked = []
+    monkeypatch.setattr(law_go_kr, "click_row_by_number", lambda browser, n: clicked.append(n))
+
+    open_law_detail_by_name(MagicMock(), "law", "자본시장과 금융투자업에 관한 법률")
+
+    assert clicked == [5]  # 현행(번호 5)을 골라야지 시행예정(번호 4)이 아님
+
+
+def test_open_law_detail_by_name_clicks_only_match_when_none_are_upcoming(monkeypatch):
+    df = pd.DataFrame({"번호": ["1"], "법령명": ["은행법"], "_upcoming": [False]})
+
+    monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
+    monkeypatch.setattr(law_go_kr, "_goto_page_with_retry", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "_wait_for_fresh_table", lambda *a, **k: df)
+    monkeypatch.setattr(law_go_kr, "wait_for_detail_page", lambda *a, **k: None)
+
+    clicked = []
+    monkeypatch.setattr(law_go_kr, "click_row_by_number", lambda browser, n: clicked.append(n))
+
+    open_law_detail_by_name(MagicMock(), "law", "은행법")
+
+    assert clicked == [1]
+
+
+# ---------------------------------------------------------------------------
+# get_page_range: last_page_number이 1, 6, 11, ...(새 5개 구간의 시작점과
+# 같은 값)일 때 그 마지막 페이지가 통째로 누락되던 경계값 버그.
+# ---------------------------------------------------------------------------
+
+def test_get_page_range_covers_a_single_page_result():
+    """query= 검색 결과가 1페이지짜리일 때 실제로 재현된 버그: 예전 코드는
+    이 경우 빈 리스트를 반환해서 그 유일한 페이지조차 확인하지 못했다."""
+    assert get_page_range(1) == [(1, 1)]
+
+
+def test_get_page_range_covers_exact_multiples_of_five():
+    assert get_page_range(5) == [(1, 5)]
+    assert get_page_range(10) == [(1, 5), (6, 10)]
+
+
+def test_get_page_range_covers_one_past_a_multiple_of_five():
+    assert get_page_range(6) == [(1, 5), (6, 6)]
+    assert get_page_range(11) == [(1, 5), (6, 10), (11, 11)]
+
+
+def test_get_page_range_covers_arbitrary_counts():
+    assert get_page_range(7) == [(1, 5), (6, 7)]
+    assert get_page_range(23) == [(1, 5), (6, 10), (11, 15), (16, 20), (21, 23)]
