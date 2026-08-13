@@ -66,6 +66,13 @@ def _build_embedder() -> Embedder:
             model=os.environ.get("GEMINI_EMBED_MODEL", "gemini-embedding-001"),
             dimension=int(os.environ.get("GEMINI_EMBED_DIMENSION", "768")),
             batch_size=int(os.environ.get("GEMINI_EMBED_BATCH_SIZE", "10")),
+            # 무료 등급 분당 쿼터 초과(429) 시 재시도 대기 -- 유료 플랜으로
+            # 넘어가면 쿼터가 커져 이 경로를 사실상 안 타게 되지만(429가 안
+            # 나면 그냥 안 기다림), 재시도 횟수/대기 시간을 코드 수정 없이
+            # 바꿀 수 있도록 env로 뺐다. 재시도 자체를 끄고 싶으면
+            # GEMINI_EMBED_RATE_LIMIT_MAX_RETRIES=1로 설정.
+            rate_limit_max_retries=int(os.environ.get("GEMINI_EMBED_RATE_LIMIT_MAX_RETRIES", "5")),
+            rate_limit_backoff_seconds=float(os.environ.get("GEMINI_EMBED_RATE_LIMIT_BACKOFF_SECONDS", "60")),
         )
     raise RuntimeError(f"Unknown EMBEDDER_BACKEND: {backend}")
 
