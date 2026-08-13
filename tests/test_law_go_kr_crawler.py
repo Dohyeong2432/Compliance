@@ -572,6 +572,51 @@ def test_parse_listing_table_skips_decoy_filter_popup_table():
     assert table_df.iloc[0]["법령명"] == "금융지주회사법"
 
 
+# 실제 "금융투자업규정" 행정규칙(reg) 검색 결과 페이지에서 확인: law 검색
+# 페이지와 달리 여기서는 필터 팝업(div#divCptOfi)이 실제 결과 테이블보다
+# DOM에서 "뒤에" 나온다(페이지마다 순서가 다를 수 있다는 뜻) -- 그래도
+# "번호" 컬럼 매칭 방식은 순서와 무관하게 동작해야 한다.
+_LISTING_HTML_REG_WITH_DECOY_FILTER_POPUP_TABLE_AFTER = """
+<table summary="행정규칙 검색결과 목록으로 항목은 번호, 법령명, 법령종류, 발령번호, 발령일자, 제정·개정구분, 기관명입니다">
+<caption>행정규칙 검색결과 목록</caption>
+<thead><tr>
+<th scope="col">번호</th><th scope="col">행정규칙명</th><th scope="col">행정규칙종류</th>
+<th scope="col">발령번호</th><th scope="col">발령일자</th><th scope="col">시행일자</th>
+<th scope="col">제정·개정구분</th><th scope="col">소관부처</th>
+</tr></thead>
+<tbody>
+<tr><td>1</td><td class="tl"><a href="#AJAX"><strong>금융</strong><strong>투자업</strong><strong>규정</strong></a></td>
+<td><p>금융위원회고시</p></td><td><p>제2026-28호</p></td><td>2026. 7. 8.</td><td>2026. 7. 8.</td>
+<td>일부개정</td><td class="tl"><p>금융위원회</p></td></tr>
+<tr><td>2</td><td class="tl"><a href="#AJAX"><strong>금융</strong><strong>투자업</strong><strong>규정</strong>시행세칙</a></td>
+<td><p>금융감독원세칙</p></td><td>-</td><td>2026. 7. 6.</td><td>2026. 7. 8.</td>
+<td>일부개정</td><td class="tl"><p>금융감독원</p></td></tr>
+</tbody>
+</table>
+<div id="divCptOfi" style="display:none;">
+<table class="table1">
+<tr><th scope="col">부처</th><th scope="col">청</th><th scope="col">위원회</th><th scope="col">기타</th></tr>
+<tr><td>금융위원회</td><td>-</td><td>-</td><td>-</td></tr>
+</table>
+</div>
+"""
+
+
+def test_parse_listing_table_skips_decoy_filter_popup_table_when_popup_comes_after():
+    """행정규칙(reg) 검색 결과 실제 HTML로 확인: 필터 팝업이 결과 테이블보다
+    뒤에 나오는 경우도 있다 -- "첫 번째 테이블이 항상 팝업"이라고 가정하면
+    안 되고, "번호" 헤더로 골라야 순서와 무관하게 항상 맞다."""
+    from bs4 import BeautifulSoup as bs
+
+    table_df = law_go_kr._parse_listing_table(
+        bs(_LISTING_HTML_REG_WITH_DECOY_FILTER_POPUP_TABLE_AFTER, "html.parser")
+    )
+
+    assert "행정규칙명" in table_df.columns
+    assert list(table_df["행정규칙명"]) == ["금융투자업규정", "금융투자업규정시행세칙"]
+    assert list(table_df["발령일자"]) == ["2026. 7. 8.", "2026. 7. 6."]
+
+
 def test_open_law_detail_by_name_prefers_non_upcoming_row_when_names_match(monkeypatch):
     """실제 검색 결과처럼 같은 법령명이 두 행(시행 예정 + 현행)으로 나올 때,
     시행 예정(_upcoming=True) 대신 현행 쪽을 클릭해야 한다."""
