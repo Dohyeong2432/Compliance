@@ -316,6 +316,61 @@ def _listing_html(name_col: str, rows: list[tuple[str, str]], other_date_col: st
     """
 
 
+# ---------------------------------------------------------------------------
+# _wait_for_fresh_table: law.go.kr 검색 결과는 document.readyState가
+# "complete"가 된 뒤에도 AJAX로 늦게 채워질 수 있다 -- 실사용에서 실제로
+# 존재하는 법령("금융지주회사법")도 이 경합 때문에 "찾지 못했다"로 끝난 게
+# 재현됐다. page==1(비교할 이전 상태가 없는 첫 조회)일 때 예전엔 그 즉시
+# 파싱 결과를 반환해버렸는데, 이제는 테이블이 채워질 때까지 짧게 재시도한다.
+# ---------------------------------------------------------------------------
+
+def test_wait_for_fresh_table_retries_on_first_load_until_ajax_result_appears(monkeypatch):
+    browser = MagicMock()
+    browser.page_source = "<table></table>"  # AJAX 완료 전: 결과 없음
+
+    populated_html = _listing_html("법령명", [("금융지주회사법", "2024.01.01.")])
+    calls = {"n": 0}
+
+    def fake_sleep(_):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            browser.page_source = populated_html
+
+    monkeypatch.setattr(law_go_kr.time, "sleep", fake_sleep)
+
+    table_df = law_go_kr._wait_for_fresh_table(browser, None, page=1, name_col="법령명")
+
+    assert not table_df.empty
+    assert table_df.iloc[0]["법령명"] == "금융지주회사법"
+
+
+def test_wait_for_fresh_table_returns_empty_without_raising_when_genuinely_no_results(monkeypatch):
+    """재시도를 다 써도 안 채워지면(검색 결과가 진짜 0건인 경우 포함) 예외를
+    던지지 않고 빈 DataFrame을 반환해야 한다 -- 0건도 정상적인 검색 결과다."""
+    browser = MagicMock()
+    browser.page_source = "<table></table>"
+    monkeypatch.setattr(law_go_kr.time, "sleep", lambda *a: None)
+
+    table_df = law_go_kr._wait_for_fresh_table(browser, None, page=1, name_col="법령명", retries=3)
+
+    assert table_df.empty
+
+
+def test_wait_for_fresh_table_still_raises_when_page_transition_never_settles(monkeypatch):
+    """page>1이고 비교할 이전 이름 목록(prev_names)이 있는 경우는 기존 동작
+    그대로다 -- 새 페이지로 넘어갔는데도 계속 이전 페이지와 같은 목록만
+    보이면(크롤링 랙이 영구적인 경우) 여전히 예외를 던져야 한다."""
+    browser = MagicMock()
+    stale_html = _listing_html("법령명", [("은행법", "2022.01.01.")])
+    browser.page_source = stale_html  # 페이지를 넘겨도 항상 이전 페이지와 동일
+    monkeypatch.setattr(law_go_kr.time, "sleep", lambda *a: None)
+
+    prev_names = pd.Series(["은행법"])
+
+    with pytest.raises(RuntimeError):
+        law_go_kr._wait_for_fresh_table(browser, prev_names, page=2, name_col="법령명", retries=3)
+
+
 def test_watchlist_date_lookup_prefers_law_over_reg_and_picks_latest_date(monkeypatch):
     """전체 목록을 한 번씩 훑는 대신, 이제 이름별로 law.go.kr 검색(query=)
     결과를 하나씩 확인한다 -- move_to_home이 호출될 때마다 그 site_category/
@@ -346,6 +401,11 @@ def test_watchlist_date_lookup_prefers_law_over_reg_and_picks_latest_date(monkey
         b.page_source = results.get(query, "<table></table>")
 
     monkeypatch.setattr(law_go_kr, "move_to_home", fake_move_to_home)
+    # _wait_for_fresh_table이 빈 결과(존재하지 않는 이름)를 진짜 0건으로
+    # 확정하기까지 재시도를 다 도는데, page_source는 fake_move_to_home이 이미
+    # 최종 상태로 채워놔서 매번 재시도할 필요가 없다 -- 테스트가 느려지지
+    # 않도록 그 사이 sleep만 무시한다.
+    monkeypatch.setattr(law_go_kr.time, "sleep", lambda *a, **k: None)
 
     result = law_go_kr._watchlist_date_lookup(
         browser, ["개인정보보호법", "은행법", "자금세탁방지및공중협박자금조달금지에관한업무규정", "존재하지않는법"]

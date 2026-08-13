@@ -252,12 +252,31 @@ def _wait_for_fresh_table(
 ) -> pd.DataFrame:
     """페이지 전환 직후에도 이전 페이지 DOM이 잠깐 남아있는 경우가 있어(크롤링
     랙), 이름 목록이 이전과 달라질 때까지 짧게 재확인한다. 원본은 이 대기에
-    상한이 없어 랙이 영구적이면 무한 루프에 빠졌다."""
+    상한이 없어 랙이 영구적이면 무한 루프에 빠졌다.
+
+    page==1이거나 prev_names가 없으면(이 목록을 처음 읽는 경우) "이전과
+    다르면 새로 고쳐졌다"고 판단할 기준이 없어, 예전엔 그 즉시 파싱 결과를
+    그대로 반환했다. 그런데 실사용에서 확인해보니 law.go.kr 검색 결과
+    페이지는 document.readyState가 "complete"가 된 뒤에도(정적 골격만 로드된
+    시점) 실제 결과가 AJAX로 나중에 채워진다 -- 실제로 존재하는 법령
+    ("금융지주회사법")을 검색해도 이 시점에 즉시 읽으면 빈 목록으로 나와
+    "찾지 못했다"로 끝나는 게 재현됐다. 그래서 이 경우엔 테이블이 채워질
+    때까지(또는 재시도가 다 될 때까지) 짧게 재확인한다 -- 다만 검색 결과가
+    정말로 0건인 것도 정상적인 결과이지 오류가 아니므로, 재시도를 다 써도
+    예외를 던지지 않고 그때까지 읽은 결과(빈 테이블일 수도 있음)를 그대로
+    반환한다."""
+    no_baseline = page == 1 or prev_names is None
+    table_df = pd.DataFrame()
     for _ in range(retries):
         table_df = _parse_listing_table(bs(browser.page_source, "html.parser"))
-        if page == 1 or prev_names is None or name_col not in table_df or not prev_names.equals(table_df[name_col]):
+        if no_baseline:
+            if not table_df.empty:
+                return table_df
+        elif name_col not in table_df or not prev_names.equals(table_df[name_col]):
             return table_df
         time.sleep(0.3)
+    if no_baseline:
+        return table_df
     raise RuntimeError("페이지 갱신 대기 시간 초과 (동일한 목록이 반복 감지됨)")
 
 
@@ -678,7 +697,11 @@ def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[
 
             move_to_home(browser, site_category, query=original_name)
             time.sleep(0.5)
-            table_df = _parse_listing_table(bs(browser.page_source, "html.parser"))
+            # page=1, prev_names=None -> AJAX로 결과가 채워질 때까지 짧게
+            # 재확인만 하고, 재시도가 다 돼도 예외 없이 빈 테이블을 반환한다
+            # (_wait_for_fresh_table 참고 -- open_law_detail_by_name과 동일한
+            # 경합을 여기서도 겪는다).
+            table_df = _wait_for_fresh_table(browser, None, 1, name_col)
             if table_df.empty or name_col not in table_df or _EFFECTIVE_DATE_COLUMN not in table_df:
                 continue
 
