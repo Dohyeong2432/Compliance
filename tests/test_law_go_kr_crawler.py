@@ -11,7 +11,9 @@ from crawlers.law_go_kr import (
     click_row_by_number,
     crawl_watchlist_items,
     crawl_watchlist_items_incremental,
+    get_last_page_number,
     law_detail_to_items,
+    move_to_home,
     open_law_or_reg_detail_by_name,
     parse_law_body_html,
     wait_for_detail_page,
@@ -426,3 +428,50 @@ def test_crawl_watchlist_items_incremental_drops_item_when_no_cache_and_crawl_fa
     )
 
     assert items == []
+
+
+# ---------------------------------------------------------------------------
+# move_to_home / get_last_page_number: query 파라미터로 law.go.kr 자체 검색
+# 결과에 바로 들어가는지 -- 실사용해보니 검색 없이 전체 목록을 1페이지부터
+# 넘기는 방식은 감당 못 할 정도로 느려서, open_law_detail_by_name()이 검색
+# 결과 안에서만 페이지를 넘기도록 바꿨다.
+# ---------------------------------------------------------------------------
+
+def _stub_ready_state(browser):
+    browser.execute_script.return_value = "complete"
+
+
+def test_move_to_home_without_query_hits_plain_listing_url():
+    browser = MagicMock()
+    _stub_ready_state(browser)
+
+    move_to_home(browser, "law")
+
+    browser.get.assert_called_once_with(law_go_kr.get_url("law"))
+
+
+def test_move_to_home_with_query_appends_url_encoded_search_term():
+    browser = MagicMock()
+    _stub_ready_state(browser)
+
+    move_to_home(browser, "law", query="은행법")
+
+    called_url = browser.get.call_args[0][0]
+    assert called_url.startswith(law_go_kr.get_url("law"))
+    assert called_url.endswith("%EC%9D%80%ED%96%89%EB%B2%95")  # quote("은행법")
+
+
+def test_get_last_page_number_resets_to_the_same_query_not_the_full_listing(monkeypatch):
+    """get_last_page_number는 마지막 페이지 번호를 읽은 뒤 목록 맨 앞으로
+    되돌아가는데, query 없이 되돌아가면 검색으로 좁혀둔 결과를 잃고 전체
+    목록으로 빠져버린다 -- 반드시 같은 query로 되돌아가야 한다."""
+    browser = MagicMock()
+    browser.find_elements.return_value = []  # "마지막으로" 버튼도, 페이지 번호도 없는 단순 케이스
+    _stub_ready_state(browser)
+
+    calls = []
+    monkeypatch.setattr(law_go_kr, "move_to_home", lambda b, site, query="": calls.append(query))
+
+    get_last_page_number(browser, "law", query="은행법")
+
+    assert calls == ["은행법"]

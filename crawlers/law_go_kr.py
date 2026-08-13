@@ -52,6 +52,7 @@ import time
 from datetime import date
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 # ChromeDriverManager().install()이 사용 중인 Chrome 버전에 맞는 드라이버를
 # 찾으려고 googlechromelabs.github.io에 HTTPS로 접속하는데, 사내망처럼
@@ -91,14 +92,18 @@ def get_url(site_category: str) -> str:
     return _URLS[site_category]
 
 
-def move_to_home(browser: webdriver.Chrome, site_category: str) -> None:
-    browser.get(get_url(site_category))
+def move_to_home(browser: webdriver.Chrome, site_category: str, query: str = "") -> None:
+    """목록 홈으로 이동. query를 주면 law.go.kr 자체 검색으로 필터링된 결과
+    목록으로 바로 들어간다 -- 전체 목록(수십~수백 페이지)을 처음부터 넘기며
+    이름을 찾는 대신, 검색으로 좁혀진(보통 1~수 페이지) 목록만 넘기면 되므로
+    open_law_detail_by_name()처럼 이름 하나를 찾을 때 훨씬 빠르다."""
+    browser.get(get_url(site_category) + quote(query))
     WebDriverWait(browser, 10).until(
         lambda b: b.execute_script("return document.readyState") == "complete"
     )
 
 
-def get_last_page_number(browser: webdriver.Chrome, site_category: str) -> int | None:
+def get_last_page_number(browser: webdriver.Chrome, site_category: str, query: str = "") -> int | None:
     for tag in browser.find_elements(By.TAG_NAME, "img"):
         if tag.get_property("alt").strip() == "마지막으로":
             try:
@@ -114,7 +119,7 @@ def get_last_page_number(browser: webdriver.Chrome, site_category: str) -> int |
             last_page_number = int(tag.text)
             break
 
-    move_to_home(browser, site_category)
+    move_to_home(browser, site_category, query)
     time.sleep(0.5)
     return last_page_number
 
@@ -465,16 +470,21 @@ def get_body_content_html(browser: webdriver.Chrome) -> str:
 
 
 def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_name: str) -> None:
-    """law_name(한글만 비교)과 일치하는 항목을 목록에서 찾아 상세(본문) 페이지를
-    연다. 참고 코드가 실제로 쓰는 방식과 동일하게 페이지를 넘기며 찾다가,
-    찾은 바로 그 페이지에서 클릭까지 이어서 한다. 동명이인이 있으면(제목이
-    같은 옛 버전 등) 번호가 가장 큰(=가장 최근) 행을 선택한다."""
+    """law_name(한글만 비교)과 일치하는 항목을 찾아 상세(본문) 페이지를 연다.
+
+    law.go.kr 자체 검색(query=)으로 먼저 좁힌 결과 목록에서 찾는다 -- 전체
+    목록을 1페이지부터 끝까지 넘기며 찾는 것은 실사용해보니 감당하기 힘들
+    정도로 느렸다(법령 목록이 최신순 정렬이라, 오래되고 개정이 뜸한 법령일수록
+    한참 뒤 페이지에 있어 수십~수백 페이지를 넘겨야 했음). 검색 결과 안에서는
+    기존과 동일하게 페이지를 넘기며 정확히 일치하는 이름을 찾고, 동명이인이
+    있으면(제목이 같은 옛 버전 등) 번호가 가장 큰(=가장 최근) 행을 선택한다.
+    """
     normalized_target = re.sub(r"[^가-힣]", "", law_name).strip()
     name_col, date_col = get_column_name(site_category)
-    move_to_home(browser, site_category)
+    move_to_home(browser, site_category, query=law_name)
     time.sleep(0.5)
 
-    last_page_number = get_last_page_number(browser, site_category) or 1
+    last_page_number = get_last_page_number(browser, site_category, query=law_name) or 1
     prev_names: pd.Series | None = None
 
     for range_start, range_end in get_page_range(last_page_number):

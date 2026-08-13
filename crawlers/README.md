@@ -48,7 +48,15 @@ Selenium이 Chrome을 직접 실행하므로 로컬 PC(또는 Chrome이 설치�
     붙어 나온다는 걸 이번에 받은 실제 HTML로 확인해서, 약칭이 있어도 걸리지
     않도록 접두어 일치로 고쳤습니다.
   - `open_law_detail_by_name(browser, site_category, law_name)` — 이름을
-    아는 법령 하나를 목록에서 찾아 여는, 참고 코드와 가장 가까운 진입점.
+    아는 법령 하나를 찾아 여는, 참고 코드와 가장 가까운 진입점.
+    **law.go.kr 자체 검색(`query=`)으로 먼저 좁힌 결과 목록 안에서 찾습니다**
+    — 처음엔 검색 없이 전체 목록을 1페이지부터 넘기며 찾았는데, 실사용해보니
+    법령 목록이 최신순 정렬이라 오래되고 개정이 뜸한 법령일수록 한참 뒤
+    페이지에 있어 수십~수백 페이지를 넘겨야 해서 감당 못 할 정도로
+    느렸습니다. `move_to_home(browser, site_category, query=law_name)`으로
+    검색 결과 페이지로 바로 들어간 다음, 그 안(보통 1~수 페이지)에서만
+    기존 페이지 넘기기/매칭 로직을 그대로 씁니다. `get_last_page_number`도
+    같은 `query`로 되돌아가야 검색 결과를 안 잃으므로 함께 고쳤습니다.
   - `open_law_or_reg_detail_by_name(browser, name)` — 위 함수를
     `site_category="law"`로 먼저 시도하고, 실패하면 `"reg"`로 재시도합니다.
     법규리스트에는 법령/행정규칙 구분이 없으므로(law.go.kr 자체가 두
