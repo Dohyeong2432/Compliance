@@ -66,6 +66,7 @@ import pandas as pd
 from bs4 import BeautifulSoup as bs
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
@@ -244,6 +245,64 @@ def _parse_listing_table(page_source: bs) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+_LEFT_LIST_ROW_ID = re.compile(r"^liBgcolor\d+$")
+_LEFT_LIST_EFYD = re.compile(r"\[시행\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\]")
+
+
+def _parse_left_listing(page_source: bs, name_col: str) -> pd.DataFrame:
+    """검색 결과 페이지의 기본(좌측, #listDiv) 목록 뷰를 파싱한다.
+
+    law.go.kr 검색 결과 페이지는 같은 결과를 두 벌로 렌더링한다: 기본으로
+    화면에 보이는 #listDiv > ul.left_list_bx의 <li> 목록과, <table> 기반의
+    "와이드" 뷰(#WideListDIV)다. 실제 HTML로 조상 체인을 추적해보니
+    #WideListDIV는 style="display: none;"이었다 -- Selenium 브라우저가
+    "와이드 보기"를 켠 적 없는 세션(크롤러가 매번 새로 띄우는 브라우저가
+    정확히 이 상태)에서는 항상 이 상태다. _parse_listing_table()(테이블
+    기반)이 찾는 "번호" 헤더 테이블이 바로 이 안에 있다 -- BeautifulSoup은
+    CSS 가시성을 신경 안 써서 파싱 자체는 문제없이 됐지만, click_row_by_
+    number()가 Selenium으로 그 안의 <tr>를 다시 찾으려 하면 숨겨진 요소의
+    .text가 항상 빈 문자열이라 못 찾았다 -- "찾지 못했다" 오탐의 진짜
+    원인이었다(실사용 HTML로 확인). 그래서 실제로 클릭 가능한 이 좌측
+    목록을 대신 파싱한다.
+
+    각 행(<li id="liBgcolorN">)의 <a title="법령명\\n[시행 ...] [...]">에서
+    첫 줄(법령명)을 이름으로, title 안의 "[시행 YYYY. M. D.]"를 시행일자로
+    뽑는다. law.go.kr는 아직 시행 전인 개정 버전도 같은 이름으로 별도 행에
+    나올 수 있는데, 이 뷰에는 (테이블 뷰의 `<img alt="앞으로 시행될
+    법령">`같은) 명시적인 표시가 없어서, 대신 뽑아낸 시행일자를 오늘 날짜와
+    비교해 "_upcoming"을 직접 계산한다."""
+    list_div = page_source.find(id="listDiv")
+    if list_div is None:
+        return pd.DataFrame()
+
+    today = date.today()
+    rows: list[dict[str, Any]] = []
+    for index, li in enumerate(list_div.find_all("li", id=_LEFT_LIST_ROW_ID)):
+        anchor = li.find("a", recursive=False)
+        title = anchor.get("title") if anchor is not None else None
+        if not title:
+            continue
+        name = title.split("\n", 1)[0].strip()
+
+        span_tx2 = anchor.find("span", class_="tx2")
+        efyd_match = _LEFT_LIST_EFYD.search(span_tx2.get_text()) if span_tx2 is not None else None
+        effective_date = None
+        upcoming = False
+        if efyd_match is not None:
+            year, month, day = (int(g) for g in efyd_match.groups())
+            effective_date = f"{year:04d}.{month:02d}.{day:02d}."
+            upcoming = date(year, month, day) > today
+
+        rows.append({
+            "번호": str(index + 1),
+            "_li_id": li["id"],
+            name_col: name,
+            _EFFECTIVE_DATE_COLUMN: effective_date,
+            "_upcoming": upcoming,
+        })
+    return pd.DataFrame(rows)
+
+
 def _goto_page_with_retry(browser: webdriver.Chrome, page_num: int, retries: int = 5) -> None:
     for _ in range(retries):
         try:
@@ -260,6 +319,7 @@ def _wait_for_fresh_table(
     page: int,
     name_col: str,
     retries: int = 20,
+    parse_fn=_parse_listing_table,
 ) -> pd.DataFrame:
     """페이지 전환 직후에도 이전 페이지 DOM이 잠깐 남아있는 경우가 있어(크롤링
     랙), 이름 목록이 이전과 달라질 때까지 짧게 재확인한다. 원본은 이 대기에
@@ -275,11 +335,17 @@ def _wait_for_fresh_table(
     때까지(또는 재시도가 다 될 때까지) 짧게 재확인한다 -- 다만 검색 결과가
     정말로 0건인 것도 정상적인 결과이지 오류가 아니므로, 재시도를 다 써도
     예외를 던지지 않고 그때까지 읽은 결과(빈 테이블일 수도 있음)를 그대로
-    반환한다."""
+    반환한다.
+
+    parse_fn: page_source(bs)를 받아 DataFrame을 반환하는 파서. 기본은
+    (레거시 crawl_listing()/crawl_law_items()가 쓰는) 테이블 기반
+    _parse_listing_table이고, 실제 클릭 가능한 좌측 목록을 읽어야 하는
+    open_law_detail_by_name()/_watchlist_date_lookup()은 _parse_left_listing을
+    넘겨 쓴다."""
     no_baseline = page == 1 or prev_names is None
     table_df = pd.DataFrame()
     for _ in range(retries):
-        table_df = _parse_listing_table(bs(browser.page_source, "html.parser"))
+        table_df = parse_fn(bs(browser.page_source, "html.parser"))
         if no_baseline:
             if not table_df.empty:
                 return table_df
@@ -523,6 +589,21 @@ def click_row_by_number(browser: webdriver.Chrome, row_number: int) -> None:
     raise RuntimeError(f"번호 {row_number}에 해당하는 행을 현재 페이지에서 찾을 수 없습니다")
 
 
+def click_left_list_row(browser: webdriver.Chrome, li_id: str) -> None:
+    """#listDiv 좌측 목록에서 li_id(_parse_left_listing이 뽑은 <li id="...">
+    값, 예: "liBgcolor0")에 해당하는 행의 <a>를 클릭한다.
+
+    law.go.kr는 이 id를 #WideListDIV 내부의 숨겨진 사본에도 그대로 중복해서
+    쓴다(잘못된 마크업이지만 실제 HTML로 확인됨). By.ID 조회는 문서에 먼저
+    나오는 요소를 찾는데 #listDiv가 항상 #WideListDIV보다 앞에 나오므로,
+    이 id로 찾으면 항상 보이는(#listDiv 쪽) 행이 선택된다."""
+    try:
+        li = browser.find_element(By.ID, li_id)
+    except NoSuchElementException as exc:
+        raise RuntimeError(f"'{li_id}'에 해당하는 행을 현재 페이지에서 찾을 수 없습니다") from exc
+    li.find_element(By.TAG_NAME, "a").click()
+
+
 def wait_for_detail_page(browser: webdriver.Chrome, expected_name: str, timeout: int = 15) -> None:
     """상세 페이지 로드 대기: <h2> 텍스트(한글만 남기고 비교)가 expected_name으로
     시작할 때까지 폴링. 원본은 이 대기에 상한이 없어 페이지가 영영 안 뜨면
@@ -560,9 +641,14 @@ def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_n
     시행 전인 개정 버전) -- `_upcoming` 플래그로 아직 시행 전인 행은 제외하고
     현행 버전을 우선 선택한다(실제 검색 결과에서 확인된 동작). 그러고도
     여러 행이 남으면(동명이인 등) 번호가 가장 큰 행을 선택한다.
+
+    행 클릭은 _parse_left_listing()이 파싱하는 #listDiv 좌측 목록(li_id)
+    기준이다 -- <table> 기반 뷰(#WideListDIV)는 display:none이라 Selenium
+    으로 그 안의 행을 다시 찾아 클릭할 수 없다는 게 실사용 HTML로 확인됐다
+    (click_left_list_row 참고).
     """
     normalized_target = re.sub(r"[^가-힣]", "", law_name).strip()
-    name_col, date_col = get_column_name(site_category)
+    name_col, _ = get_column_name(site_category)
     move_to_home(browser, site_category, query=law_name)
     time.sleep(0.5)
 
@@ -574,7 +660,9 @@ def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_n
             _goto_page_with_retry(browser, page)
             time.sleep(0.5)
 
-            table_df = _wait_for_fresh_table(browser, prev_names, page, name_col)
+            table_df = _wait_for_fresh_table(
+                browser, prev_names, page, name_col, parse_fn=lambda soup: _parse_left_listing(soup, name_col)
+            )
             if not table_df.empty and name_col in table_df:
                 normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
                 matches = table_df[normalized_col == normalized_target]
@@ -583,8 +671,8 @@ def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_n
                         current_matches = matches[~matches["_upcoming"]]
                         if not current_matches.empty:
                             matches = current_matches
-                    row_number = int(matches["번호"].astype(int).max())
-                    click_row_by_number(browser, row_number)
+                    best_row = matches.loc[matches["번호"].astype(int).idxmax()]
+                    click_left_list_row(browser, best_row["_li_id"])
                     wait_for_detail_page(browser, law_name)
                     time.sleep(0.5)
                     return
@@ -717,8 +805,13 @@ def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[
             # page=1, prev_names=None -> AJAX로 결과가 채워질 때까지 짧게
             # 재확인만 하고, 재시도가 다 돼도 예외 없이 빈 테이블을 반환한다
             # (_wait_for_fresh_table 참고 -- open_law_detail_by_name과 동일한
-            # 경합을 여기서도 겪는다).
-            table_df = _wait_for_fresh_table(browser, None, 1, name_col)
+            # 경합을 여기서도 겪는다). #WideListDIV(테이블 뷰)는 display:none
+            # 이라 실제 화면엔 좌측 목록(#listDiv)만 보이므로 그쪽을 읽는다
+            # (open_law_detail_by_name과 동일한 이유 -- _parse_left_listing
+            # 참고).
+            table_df = _wait_for_fresh_table(
+                browser, None, 1, name_col, parse_fn=lambda soup: _parse_left_listing(soup, name_col)
+            )
             if table_df.empty or name_col not in table_df or _EFFECTIVE_DATE_COLUMN not in table_df:
                 continue
 

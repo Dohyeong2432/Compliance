@@ -4,10 +4,11 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
 import crawlers.law_go_kr as law_go_kr
 from crawlers.law_go_kr import (
+    click_left_list_row,
     click_row_by_number,
     crawl_watchlist_items,
     crawl_watchlist_items_incremental,
@@ -318,12 +319,11 @@ def test_crawl_watchlist_items_defaults_to_law_watchlist(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _listing_html(name_col: str, rows: list[tuple[str, str]], other_date_col: str = "공포일자") -> str:
-    """_parse_listing_table이 파싱할 수 있는 최소한의 목록 테이블 HTML.
-
-    other_date_col(공포일자/발령일자)과 시행일자를 둘 다 넣어, 실제 페이지처럼
-    두 날짜가 같이 나오는 상황을 흉내낸다 -- _watchlist_date_lookup은 이제
-    시행일자만 읽으므로, other_date_col 값은 "다른 컬럼도 있지만 무시된다"는
-    걸 보여주는 용도로 시행일자와 다른 값을 넣어둔다."""
+    """_parse_listing_table이 파싱할 수 있는 최소한의 목록 테이블 HTML(<table>
+    기반 "와이드" 뷰). crawl_listing()/crawl_law_items() 등 레거시 경로와
+    _wait_for_fresh_table()의 기본 parse_fn(_parse_listing_table) 테스트에
+    쓴다 -- 실제 운영 경로(open_law_detail_by_name/_watchlist_date_lookup)는
+    이제 이 뷰가 아니라 _left_listing_html()이 흉내내는 좌측 목록을 읽는다."""
     trs = "\n".join(
         f"<tr><td>{i + 1}</td><td>{name}</td><td>9999.12.31.</td><td>{date}</td></tr>"
         for i, (name, date) in enumerate(rows)
@@ -334,6 +334,135 @@ def _listing_html(name_col: str, rows: list[tuple[str, str]], other_date_col: st
     {trs}
     </table>
     """
+
+
+def _left_listing_html(rows: list[tuple[str, str]]) -> str:
+    """_parse_left_listing이 파싱할 수 있는 최소한의 #listDiv 좌측 목록 HTML
+    (실제 클릭 가능한 기본 뷰 -- <table> 기반 #WideListDIV는 display:none
+    이라 이 뷰를 흉내낸 게 실제 운영 경로와 맞다).
+
+    rows: (이름, "YYYY. M. D." 형식 시행일자) 목록. title/span.tx2엔 실제
+    페이지처럼 시행일자 말고 다른 날짜(공포일자 역할, 9999. 12. 31.로 일부러
+    동떨어진 값)도 같이 넣어 "[시행 ...] 괄호만 읽는다"는 걸 검증한다."""
+    lis = "\n".join(
+        f'<li id="liBgcolor{i}"><a href="#" '
+        f'title="{name}\n[시행 {date}] [법률 제9999호, 9999. 12. 31., 일부개정]">'
+        f'<span class="tx">{i + 1}. {name}</span>'
+        f'<span class="tx2">[시행 {date}] [법률 제9999호, 9999. 12. 31., 일부개정]</span>'
+        f"</a></li>"
+        for i, (name, date) in enumerate(rows)
+    )
+    return f'<div id="listDiv"><ul class="left_list_bx type02">{lis}</ul></div>'
+
+
+# ---------------------------------------------------------------------------
+# _parse_left_listing / click_left_list_row: 사용자가 실제로 캡처한
+# "금융지주회사법" 검색+상세 페이지 HTML로 확인된 문제 -- _parse_listing_table
+# 이 찾는 "번호" 헤더 테이블은 #WideListDIV(style="display: none;") 안에
+# 있어서, BeautifulSoup은 문제없이 파싱해도 Selenium(click_row_by_number)은
+# 숨겨진 <tr>의 .text가 항상 빈 문자열이라 클릭 대상을 못 찾았다. 실제로
+# 화면에 보이는 #listDiv > ul.left_list_bx > li 목록을 대신 읽어야 한다.
+# ---------------------------------------------------------------------------
+
+# 실제 HTML에서 그대로 가져온 구조(법령명, li id, 시행일자, 공포번호/일자,
+# 제정개정구분) -- 소관부처 상세설정 팝업 등 나머지는 파싱과 무관해 생략.
+_REAL_LEFT_LISTING_HTML = """
+<div id="west">
+ <div id="leftContent">
+  <div id="listDiv" style="height: 692px;">
+   <div class="left_area" id="lelistwrapLeft" style="height: 692px;">
+    <ul class="left_list_bx type02">
+     <input type="hidden" id="direct3" value="금융지주회사법">
+     <li id="liBgcolor0" class="on">
+      <a href="#" onclick="lsViewWideAll('254783','20230914','liBgcolor0',$(this),'3','0','Y','81'); return false;"
+         title="금융지주회사법
+[시행 2023. 9. 14.] [법률 제19700호, 2023. 9. 14., 타법개정]">
+       <span class="tx">1. &nbsp;<strong class="tbl_tx_type">금융</strong><strong class="tbl_tx_type">지주</strong><strong class="tbl_tx_type"><strong class="tbl_tx_type">회사</strong>법</strong></span>
+       <span class="tx2">[시행 2023. 9. 14.] [법률 제19700호, 2023. 9. 14., 타법개정]</span>
+      </a>
+      <div class="list_bx_in"><ul class="inner"><li><a href="#">본문</a></li></ul></div>
+     </li>
+     <li id="liBgcolor1">
+      <a href="#" onclick="lsViewWideAll('278145','20251001','liBgcolor1',$(this),'3','0','Y','81'); return false;"
+         title="금융지주회사법 시행령
+[시행 2025. 10. 1.] [대통령령 제35811호, 2025. 10. 1., 타법개정]">
+       <span class="tx">2. &nbsp;<strong class="tbl_tx_type">금융</strong><strong class="tbl_tx_type">지주</strong><strong class="tbl_tx_type"><strong class="tbl_tx_type">회사</strong>법</strong> 시행령</span>
+       <span class="tx2">[시행 2025. 10. 1.] [대통령령 제35811호, 2025. 10. 1., 타법개정]</span>
+      </a>
+     </li>
+    </ul>
+   </div>
+  </div>
+ </div>
+ <!-- WideListDIV(<table> 뷰)는 display:none이라 실제로 안 보임 -- 파서가
+      이걸 무시하고 #listDiv만 읽는지 확인하기 위해 같이 넣어둔다. -->
+ <div id="WideListDIV" style="display: none;">
+  <table summary="법령 검색결과 목록으로 항목은 번호, 법령명, ...">
+   <tr><th scope="col">번호</th><th scope="col">법령명</th><th scope="col">공포일자</th></tr>
+   <tr><td>1</td><td>이건 숨겨진 테이블이라 무시돼야 함</td><td>1999. 1. 1.</td></tr>
+  </table>
+ </div>
+</div>
+"""
+
+
+def test_parse_left_listing_extracts_name_and_effective_date_from_real_html():
+    """사용자가 캡처한 실제 "금융지주회사법" 검색 결과 HTML(축약본)로 확인:
+    이름은 title의 첫 줄, 시행일자는 "[시행 ...]" 괄호에서만 뽑아야 한다 --
+    두 번째 괄호([법률 제19700호, 2023. 9. 14., ...])의 날짜(공포일자)를
+    잘못 집으면 안 된다."""
+    from bs4 import BeautifulSoup as bs
+
+    table_df = law_go_kr._parse_left_listing(bs(_REAL_LEFT_LISTING_HTML, "html.parser"), "법령명")
+
+    assert list(table_df["법령명"]) == ["금융지주회사법", "금융지주회사법 시행령"]
+    assert list(table_df["_li_id"]) == ["liBgcolor0", "liBgcolor1"]
+    assert list(table_df[law_go_kr._EFFECTIVE_DATE_COLUMN]) == ["2023.09.14.", "2025.10.01."]
+    # 둘 다 이미 시행된 날짜라(오늘 기준) upcoming이 아니어야 함
+    assert list(table_df["_upcoming"]) == [False, False]
+    # 숨겨진 #WideListDIV 쪽 내용은 결과에 전혀 섞이지 않아야 함
+    assert "이건 숨겨진 테이블이라 무시돼야 함" not in table_df["법령명"].tolist()
+
+
+def test_parse_left_listing_flags_future_effective_date_as_upcoming():
+    html = _left_listing_html([("금융지주회사법", "2099. 1. 1.")])
+    from bs4 import BeautifulSoup as bs
+
+    table_df = law_go_kr._parse_left_listing(bs(html, "html.parser"), "법령명")
+
+    assert bool(table_df.iloc[0]["_upcoming"]) is True
+
+
+def test_parse_left_listing_returns_empty_when_listdiv_missing():
+    """#listDiv 자체가 없으면(AJAX 완료 전 등) 빈 DataFrame을 반환해야
+    한다 -- _wait_for_fresh_table의 재시도 로직이 이를 "아직 안 채워짐"으로
+    보고 계속 재시도한다."""
+    from bs4 import BeautifulSoup as bs
+
+    table_df = law_go_kr._parse_left_listing(bs("<div>아직 로딩 전</div>", "html.parser"), "법령명")
+
+    assert table_df.empty
+
+
+def test_click_left_list_row_clicks_the_matching_li_link():
+    browser = MagicMock()
+    li = MagicMock()
+    link = MagicMock()
+    li.find_element.return_value = link
+    browser.find_element.return_value = li
+
+    click_left_list_row(browser, "liBgcolor0")
+
+    browser.find_element.assert_called_once_with(law_go_kr.By.ID, "liBgcolor0")
+    link.click.assert_called_once()
+
+
+def test_click_left_list_row_raises_runtime_error_when_not_found():
+    browser = MagicMock()
+    browser.find_element.side_effect = NoSuchElementException("no such element")
+
+    with pytest.raises(RuntimeError, match="liBgcolor0"):
+        click_left_list_row(browser, "liBgcolor0")
 
 
 # ---------------------------------------------------------------------------
@@ -396,29 +525,31 @@ def test_watchlist_date_lookup_prefers_law_over_reg_and_picks_latest_date(monkey
     결과를 하나씩 확인한다 -- move_to_home이 호출될 때마다 그 site_category/
     query에 맞는 검색 결과 HTML을 browser.page_source에 채워 넣어 흉내낸다.
 
-    시행일자를 기준으로 비교한다는 걸 확실히 하려고, 각 행의 공포일자/
-    발령일자는 일부러 시행일자와 동떨어진 값(9999.12.31.)으로 채워뒀다 --
-    그 값이 결과에 나오면 시행일자 대신 공포일자/발령일자를 읽고 있다는 뜻."""
+    _watchlist_date_lookup은 이제 (실제로 화면에 보이는) #listDiv 좌측
+    목록을 읽으므로 _left_listing_html()로 흉내낸다 -- 각 행의 title/
+    span.tx2엔 시행일자 말고 다른 날짜(9999. 12. 31.)도 같이 들어있는데,
+    그게 결과로 나오면 "[시행 ...]" 괄호가 아니라 다른 날짜를 읽고 있다는
+    뜻이다."""
     law_results = {
-        "개인정보보호법": _listing_html("법령명", [("개인정보보호법", "2023.01.01."), ("개인정보보호법", "2024.06.15.")]),
-        "은행법": _listing_html("법령명", [("은행법", "2022.03.01.")]),
-        "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html("법령명", []),
-        "존재하지않는법": _listing_html("법령명", []),
+        "개인정보보호법": _left_listing_html([("개인정보보호법", "2023. 1. 1."), ("개인정보보호법", "2024. 6. 15.")]),
+        "은행법": _left_listing_html([("은행법", "2022. 3. 1.")]),
+        "자금세탁방지및공중협박자금조달금지에관한업무규정": _left_listing_html([]),
+        "존재하지않는법": _left_listing_html([]),
     }
     reg_results = {
-        "개인정보보호법": _listing_html("행정규칙명", [("개인정보보호법", "2099.01.01.")], other_date_col="발령일자"),
-        "은행법": _listing_html("행정규칙명", [], other_date_col="발령일자"),
-        "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html(
-            "행정규칙명", [("자금세탁방지및공중협박자금조달금지에관한업무규정", "2021.05.05.")], other_date_col="발령일자"
+        "개인정보보호법": _left_listing_html([("개인정보보호법", "2099. 1. 1.")]),
+        "은행법": _left_listing_html([]),
+        "자금세탁방지및공중협박자금조달금지에관한업무규정": _left_listing_html(
+            [("자금세탁방지및공중협박자금조달금지에관한업무규정", "2021. 5. 5.")]
         ),
-        "존재하지않는법": _listing_html("행정규칙명", [], other_date_col="발령일자"),
+        "존재하지않는법": _left_listing_html([]),
     }
 
     browser = MagicMock()
 
     def fake_move_to_home(b, site_category, query=""):
         results = law_results if site_category == "law" else reg_results
-        b.page_source = results.get(query, "<table></table>")
+        b.page_source = results.get(query, "<div id='listDiv'></div>")
 
     monkeypatch.setattr(law_go_kr, "move_to_home", fake_move_to_home)
     # _wait_for_fresh_table이 빈 결과(존재하지 않는 이름)를 진짜 0건으로
@@ -715,6 +846,7 @@ def test_open_law_detail_by_name_prefers_non_upcoming_row_when_names_match(monke
     df = pd.DataFrame(
         {
             "번호": ["4", "5"],
+            "_li_id": ["liBgcolor3", "liBgcolor4"],
             "법령명": ["자본시장과 금융투자업에 관한 법률", "자본시장과 금융투자업에 관한 법률"],
             "_upcoming": [True, False],
         }
@@ -727,15 +859,15 @@ def test_open_law_detail_by_name_prefers_non_upcoming_row_when_names_match(monke
     monkeypatch.setattr(law_go_kr, "wait_for_detail_page", lambda *a, **k: None)
 
     clicked = []
-    monkeypatch.setattr(law_go_kr, "click_row_by_number", lambda browser, n: clicked.append(n))
+    monkeypatch.setattr(law_go_kr, "click_left_list_row", lambda browser, li_id: clicked.append(li_id))
 
     open_law_detail_by_name(MagicMock(), "law", "자본시장과 금융투자업에 관한 법률")
 
-    assert clicked == [5]  # 현행(번호 5)을 골라야지 시행예정(번호 4)이 아님
+    assert clicked == ["liBgcolor4"]  # 현행(번호 5)을 골라야지 시행예정(번호 4)이 아님
 
 
 def test_open_law_detail_by_name_clicks_only_match_when_none_are_upcoming(monkeypatch):
-    df = pd.DataFrame({"번호": ["1"], "법령명": ["은행법"], "_upcoming": [False]})
+    df = pd.DataFrame({"번호": ["1"], "_li_id": ["liBgcolor0"], "법령명": ["은행법"], "_upcoming": [False]})
 
     monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
     monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
@@ -744,18 +876,18 @@ def test_open_law_detail_by_name_clicks_only_match_when_none_are_upcoming(monkey
     monkeypatch.setattr(law_go_kr, "wait_for_detail_page", lambda *a, **k: None)
 
     clicked = []
-    monkeypatch.setattr(law_go_kr, "click_row_by_number", lambda browser, n: clicked.append(n))
+    monkeypatch.setattr(law_go_kr, "click_left_list_row", lambda browser, li_id: clicked.append(li_id))
 
     open_law_detail_by_name(MagicMock(), "law", "은행법")
 
-    assert clicked == [1]
+    assert clicked == ["liBgcolor0"]
 
 
 def test_open_law_detail_by_name_raises_not_in_listing_error_when_no_match(monkeypatch):
     """진짜 "이 목록엔 없음"인 경우는 _NotInListingError여야 한다 --
     open_law_or_reg_detail_by_name()이 law -> reg로 넘어갈 때 이것만
     구분해서 삼킨다."""
-    df = pd.DataFrame({"번호": ["1"], "법령명": ["다른법"], "_upcoming": [False]})
+    df = pd.DataFrame({"번호": ["1"], "_li_id": ["liBgcolor0"], "법령명": ["다른법"], "_upcoming": [False]})
 
     monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
     monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
@@ -771,19 +903,19 @@ def test_open_law_detail_by_name_propagates_click_failure_as_plain_runtime_error
     실패하는 경우는 _NotInListingError가 아니라 일반 RuntimeError로 그대로
     드러나야 한다 -- open_law_or_reg_detail_by_name()이 이걸 "이 목록엔
     없음"으로 오해해 삼키면 안 된다."""
-    df = pd.DataFrame({"번호": ["1"], "법령명": ["금융지주회사법"], "_upcoming": [False]})
+    df = pd.DataFrame({"번호": ["1"], "_li_id": ["liBgcolor0"], "법령명": ["금융지주회사법"], "_upcoming": [False]})
 
     monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
     monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
     monkeypatch.setattr(law_go_kr, "_goto_page_with_retry", lambda *a, **k: None)
     monkeypatch.setattr(law_go_kr, "_wait_for_fresh_table", lambda *a, **k: df)
 
-    def fail_to_click(browser, n):
-        raise RuntimeError("번호 1에 해당하는 행을 현재 페이지에서 찾을 수 없습니다")
+    def fail_to_click(browser, li_id):
+        raise RuntimeError(f"'{li_id}'에 해당하는 행을 현재 페이지에서 찾을 수 없습니다")
 
-    monkeypatch.setattr(law_go_kr, "click_row_by_number", fail_to_click)
+    monkeypatch.setattr(law_go_kr, "click_left_list_row", fail_to_click)
 
-    with pytest.raises(RuntimeError, match="번호 1") as exc_info:
+    with pytest.raises(RuntimeError, match="liBgcolor0") as exc_info:
         open_law_detail_by_name(MagicMock(), "law", "금융지주회사법")
     assert not isinstance(exc_info.value, law_go_kr._NotInListingError)
 
