@@ -181,8 +181,25 @@ def _parse_listing_table(page_source: bs) -> pd.DataFrame:
     "정확히 일치"하는 행으로 나옴), law.go.kr는 아직 시행 전인 행에만
     `<img alt="앞으로 시행될 법령">`을 붙여서 구분해준다(실제 검색 결과
     HTML로 확인됨). open_law_detail_by_name()이 이 "_upcoming" 플래그로
-    현행 버전만 골라 클릭할 수 있도록 행마다 같이 뽑아둔다."""
-    table_tag = page_source.find("table")
+    현행 버전만 골라 클릭할 수 있도록 행마다 같이 뽑아둔다.
+
+    첫 번째 <table>을 그냥 집으면 안 된다 -- 실제 검색 결과 페이지 전체
+    HTML로 확인해보니, 검색 결과 목록("법령 검색결과 목록" 캡션, 컬럼이
+    "번호/법령명/공포일자/...")보다 "소관부처 상세설정" 필터 팝업의
+    <table>(컬럼이 "부처/청/위원회/기타")이 DOM에 항상 먼저 나온다 --
+    화면엔 display:none으로 숨겨져 있을 뿐 검색어/결과 유무와 무관하게
+    항상 그 자리에 렌더링된다. page_source.find("table")로 첫 번째
+    <table>을 집으면 매번 이 필터 팝업을 파싱하게 되어 "법령명"/"공포일자"
+    컬럼이 없으니 date_col not in table_df가 되고, 결국 검색어와 무관하게
+    "찾지 못했다"로 끝난다(실사용에서 재현된 버그). 실제 결과 테이블은
+    첫 컬럼이 항상 "번호"라는 확실한 구분점이 있어(필터 팝업 테이블엔
+    없음) 그걸로 올바른 테이블을 골라낸다."""
+    table_tag = None
+    for candidate in page_source.find_all("table"):
+        first_th = candidate.find("th", attrs={"scope": "col"})
+        if first_th is not None and first_th.text.strip() == "번호":
+            table_tag = candidate
+            break
     if table_tag is None:
         return pd.DataFrame()
 

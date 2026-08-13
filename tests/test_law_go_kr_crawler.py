@@ -543,6 +543,35 @@ def test_parse_listing_table_flags_upcoming_rows_via_alt_image():
     assert bool(current_row["_upcoming"]) is False
 
 
+# 실제 검색 결과 페이지 전체 HTML로 확인된 버그: "소관부처 상세설정" 필터
+# 팝업의 <table>(화면엔 항상 display:none으로 숨겨져 있지만 검색어/결과와
+# 무관하게 DOM엔 항상 먼저 나온다)이 실제 결과 테이블보다 앞에 나온다.
+_LISTING_HTML_WITH_DECOY_FILTER_POPUP_TABLE_FIRST = """
+<div id="divCptOfi" style="display:none;">
+<table class="table1">
+<tr><th scope="col">부처</th><th scope="col">청</th><th scope="col">위원회</th><th scope="col">기타</th></tr>
+<tr><td>고용노동부</td><td>검찰청</td><td>공정거래위원회</td><td>감사원</td></tr>
+</table>
+</div>
+<table>
+<tr><th scope="col">번호</th><th scope="col">법령명</th><th scope="col">공포일자</th></tr>
+<tr><td>1</td><td>금융지주회사법</td><td>2023.09.14.</td></tr>
+</table>
+"""
+
+
+def test_parse_listing_table_skips_decoy_filter_popup_table():
+    """page_source.find("table")로 첫 번째 <table>을 그냥 집으면 필터 팝업
+    테이블을 파싱하게 되어 검색어와 무관하게 매번 "법령명" 컬럼이 없는
+    빈 결과가 된다 -- "번호"가 첫 컬럼인 진짜 결과 테이블을 골라야 한다."""
+    from bs4 import BeautifulSoup as bs
+
+    table_df = law_go_kr._parse_listing_table(bs(_LISTING_HTML_WITH_DECOY_FILTER_POPUP_TABLE_FIRST, "html.parser"))
+
+    assert "법령명" in table_df.columns
+    assert table_df.iloc[0]["법령명"] == "금융지주회사법"
+
+
 def test_open_law_detail_by_name_prefers_non_upcoming_row_when_names_match(monkeypatch):
     """실제 검색 결과처럼 같은 법령명이 두 행(시행 예정 + 현행)으로 나올 때,
     시행 예정(_upcoming=True) 대신 현행 쪽을 클릭해야 한다."""
