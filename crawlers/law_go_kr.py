@@ -626,23 +626,33 @@ def crawl_watchlist_items(
 def _watchlist_date_lookup(browser: webdriver.Chrome, names: list[str]) -> dict[str, str]:
     """watchlist 이름별 현재 공포일자/발령일자를 상세 페이지 없이 확인한다.
 
-    law -> reg 순으로 전체 목록을 한 번씩 훑는다(open_law_or_reg_detail_by_name과
-    동일한 우선순위: law에서 이미 찾았으면 reg는 보지 않는다). 여러 건이
-    매치되면(동명이인/개정 이력 등) 가장 최근 날짜를 취한다.
+    처음엔 law -> reg 순으로 전체 목록을 한 번씩 훑어서 한 번의 순회로
+    모든 이름의 날짜를 확인했는데, 이건 law.go.kr에 등록된 전체 건수(수천~
+    수만 건)를 이름 개수와 무관하게 매번 다 넘겨야 해서 실사용해보니
+    open_law_detail_by_name()에서와 같은 이유로 감당하기 힘들었다(watchlist가
+    164개뿐이라도, 그 164개를 위해 훨씬 많은 전체 목록을 다 훑는 건 배보다
+    배꼽이 컸음). open_law_detail_by_name()과 동일하게 이름별로 law.go.kr
+    자체 검색(query=)을 써서, 상세 페이지는 열지 않고 검색 결과 첫 페이지의
+    공포일자/발령일자만 저렴하게 읽는다. law -> reg 순으로 시도하고(law에서
+    이미 찾았으면 reg는 보지 않음), 여러 건이 매치되면(개정 이력 등) 가장
+    최근 날짜를 취한다.
     """
     normalized_targets = {re.sub(r"[^가-힣]", "", n).strip(): n for n in names}
     found: dict[str, str] = {}
 
     for site_category in ("law", "reg"):
         name_col, date_col = get_column_name(site_category)
-        table_df = crawl_listing(browser, site_category)
-        if table_df.empty or name_col not in table_df or date_col not in table_df:
-            continue
-
-        normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
         for normalized, original_name in normalized_targets.items():
             if original_name in found:
                 continue
+
+            move_to_home(browser, site_category, query=original_name)
+            time.sleep(0.5)
+            table_df = _parse_listing_table(bs(browser.page_source, "html.parser"))
+            if table_df.empty or name_col not in table_df or date_col not in table_df:
+                continue
+
+            normalized_col = table_df[name_col].map(lambda x: re.sub(r"[^가-힣]", "", str(x)).strip())
             matches = table_df[normalized_col == normalized]
             if matches.empty:
                 continue

@@ -297,30 +297,49 @@ def test_crawl_watchlist_items_defaults_to_law_watchlist(monkeypatch):
 # _watchlist_date_lookup / crawl_watchlist_items_incremental
 # ---------------------------------------------------------------------------
 
+def _listing_html(name_col: str, date_col: str, rows: list[tuple[str, str]]) -> str:
+    """_parse_listing_table이 파싱할 수 있는 최소한의 목록 테이블 HTML."""
+    trs = "\n".join(f"<tr><td>{i + 1}</td><td>{name}</td><td>{date}</td></tr>" for i, (name, date) in enumerate(rows))
+    return f"""
+    <table>
+    <tr><th scope="col">번호</th><th scope="col">{name_col}</th><th scope="col">{date_col}</th></tr>
+    {trs}
+    </table>
+    """
+
+
 def test_watchlist_date_lookup_prefers_law_over_reg_and_picks_latest_date(monkeypatch):
-    law_df = pd.DataFrame(
-        {
-            "법령명": ["개인정보보호법", "개인정보보호법", "은행법"],
-            "공포일자": ["2023.01.01.", "2024.06.15.", "2022.03.01."],
-        }
-    )
-    reg_df = pd.DataFrame(
-        {
-            "행정규칙명": ["개인정보보호법", "자금세탁방지및공중협박자금조달금지에관한업무규정"],
-            "발령일자": ["2099.01.01.", "2021.05.05."],  # 은행/개인정보는 law에서 이미 찾았으니 무시돼야 함
-        }
-    )
+    """전체 목록을 한 번씩 훑는 대신, 이제 이름별로 law.go.kr 검색(query=)
+    결과를 하나씩 확인한다 -- move_to_home이 호출될 때마다 그 site_category/
+    query에 맞는 검색 결과 HTML을 browser.page_source에 채워 넣어 흉내낸다."""
+    law_results = {
+        "개인정보보호법": _listing_html("법령명", "공포일자", [("개인정보보호법", "2023.01.01."), ("개인정보보호법", "2024.06.15.")]),
+        "은행법": _listing_html("법령명", "공포일자", [("은행법", "2022.03.01.")]),
+        "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html("법령명", "공포일자", []),
+        "존재하지않는법": _listing_html("법령명", "공포일자", []),
+    }
+    reg_results = {
+        "개인정보보호법": _listing_html("행정규칙명", "발령일자", [("개인정보보호법", "2099.01.01.")]),
+        "은행법": _listing_html("행정규칙명", "발령일자", []),
+        "자금세탁방지및공중협박자금조달금지에관한업무규정": _listing_html(
+            "행정규칙명", "발령일자", [("자금세탁방지및공중협박자금조달금지에관한업무규정", "2021.05.05.")]
+        ),
+        "존재하지않는법": _listing_html("행정규칙명", "발령일자", []),
+    }
 
-    def fake_crawl_listing(browser, site_category, *args, **kwargs):
-        return law_df if site_category == "law" else reg_df
+    browser = MagicMock()
 
-    monkeypatch.setattr(law_go_kr, "crawl_listing", fake_crawl_listing)
+    def fake_move_to_home(b, site_category, query=""):
+        results = law_results if site_category == "law" else reg_results
+        b.page_source = results.get(query, "<table></table>")
+
+    monkeypatch.setattr(law_go_kr, "move_to_home", fake_move_to_home)
 
     result = law_go_kr._watchlist_date_lookup(
-        MagicMock(), ["개인정보보호법", "은행법", "자금세탁방지및공중협박자금조달금지에관한업무규정", "존재하지않는법"]
+        browser, ["개인정보보호법", "은행법", "자금세탁방지및공중협박자금조달금지에관한업무규정", "존재하지않는법"]
     )
 
-    assert result["개인정보보호법"] == "2024-06-15"  # law의 최신 날짜, reg 값(2099)은 안 씀
+    assert result["개인정보보호법"] == "2024-06-15"  # law의 최신 날짜, reg 값(2099)은 law에서 이미 찾아서 무시됨
     assert result["은행법"] == "2022-03-01"
     assert result["자금세탁방지및공중협박자금조달금지에관한업무규정"] == "2021-05-05"  # law엔 없고 reg에만 있음
     assert "존재하지않는법" not in result

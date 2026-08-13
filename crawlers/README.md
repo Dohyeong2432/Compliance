@@ -112,9 +112,13 @@ items = crawl_watchlist_items_incremental()    # 공포일자/발령일자가 �
 `crawl_listing()`)에는 상세 페이지를 열지 않아도 공포일자/발령일자가 이미
 나와 있습니다. 그래서:
 
-1. `_watchlist_date_lookup()`이 `crawl_listing()`으로 법령/행정규칙 목록
-   전체를 한 번씩 훑어서, watchlist 164개 이름 각각의 현재 공포일자/발령일자를
-   저렴하게(상세 페이지 없이) 확인합니다.
+1. `_watchlist_date_lookup()`이 watchlist 이름 하나하나마다 law.go.kr 자체
+   검색(`query=`)으로 결과를 찾아, 상세 페이지 없이 현재 공포일자/발령일자만
+   저렴하게 확인합니다. (처음엔 `crawl_listing()`으로 전체 목록을 한 번씩만
+   훑어서 모든 이름을 한 번에 확인했는데, 이건 이름 개수와 무관하게
+   law.go.kr에 등록된 전체 건수를 매번 다 넘겨야 해서 실사용해보니 164개를
+   위해 그보다 훨씬 많은 전체 목록을 통째로 훑는 게 배보다 배꼽이 컸습니다
+   — `open_law_detail_by_name()`과 같은 이유로 이름별 검색으로 바꿨습니다.)
 2. 그 날짜를 상태 파일(`LAW_CRAWL_STATE_PATH`, 기본
    `./data/law_crawl_state.json`)에 저장해둔 지난번 날짜와 비교합니다.
 3. 같으면 상세 페이지를 다시 열지 않고, 지난번에 파싱해서 상태 파일에
