@@ -120,7 +120,20 @@ class IngestSyncer:
                 self.vector_store.delete(entity_id)
             result.removed = len(removed_ids)
 
-            result.ingested = self.pipeline.ingest_documents(documents)
+            try:
+                result.ingested = self.pipeline.ingest_documents(documents)
+            except Exception as exc:  # noqa: BLE001 -- 임베딩 API 실패(쿼터 초과 등)도
+                # fetch() 실패와 동일하게 해당 소스만 건너뛰고 계속한다. 이 호출을
+                # 감싸지 않으면 sync_once()가 lifespan()에서 그대로 await되고 있어서
+                # (api/main.py), 임베딩 API 쿼터 초과 같은 외부 요인 하나로 서버
+                # 시작 자체가 죽어버린다(실사용에서 재현: google.genai...
+                # ClientError: 429 RESOURCE_EXHAUSTED로 "Application startup
+                # failed. Exiting.").
+                logger.exception("소스 '%s' ingest 실패", name)
+                result.ok = False
+                result.errors.append(str(exc))
+                report.results.append(result)
+                continue
 
             connector_errors = getattr(connector, "errors", None)
             if connector_errors:

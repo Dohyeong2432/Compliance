@@ -111,6 +111,40 @@ def test_one_connector_failing_does_not_block_others():
     assert report.ok is False  # overall report reflects the failing source
 
 
+def test_ingest_failure_for_one_connector_does_not_block_others_or_raise():
+    """실사용 재현: 임베딩 API 실패(쿼터 초과 등)가 sync_once() 밖으로 새어
+    나가면 안 된다 -- lifespan()이 sync_once()를 그대로 await하고 있어서
+    (api/main.py), 여기서 안 잡아주면 서버 시작 자체가 죽는다(재현된
+    트레이스백: google.genai...ClientError: 429 RESOURCE_EXHAUSTED ->
+    "Application startup failed. Exiting."). fetch() 실패와 마찬가지로
+    ingest_documents() 실패도 해당 소스만 건너뛰고 나머지는 계속 성공해야
+    한다."""
+
+    class FlakyEmbedder(HashEmbedder):
+        def embed(self, texts):
+            if any("BOOM" in t for t in texts):
+                raise RuntimeError("429 RESOURCE_EXHAUSTED")
+            return super().embed(texts)
+
+    ok_connector = FakeConnector([_law_doc("1")])
+    failing_connector = FakeConnector([_law_doc("2", title="BOOM")])
+
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(FlakyEmbedder(), vector_store, graph_store)
+    syncer = IngestSyncer(pipeline, graph_store, vector_store, {"law": ok_connector, "reg": failing_connector})
+
+    report = syncer.sync_once()  # must not raise
+
+    by_name = {r.name: r for r in report.results}
+    assert by_name["reg"].ok is False
+    assert "429" in by_name["reg"].errors[0]
+    assert by_name["law"].ok is True
+    assert graph_store.has_entity("law:1")
+    assert graph_store.has_entity("law:2") is False
+    assert report.ok is False
+
+
 def test_connector_errors_attribute_is_surfaced_in_report():
     connector = FakeConnector([_law_doc("1")])
     connector.errors = [("bad-file.docx", "parse failed")]
