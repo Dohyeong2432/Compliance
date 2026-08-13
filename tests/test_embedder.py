@@ -121,6 +121,8 @@ def test_gemini_embedder_splits_large_input_into_batches():
     embedder.dimension = 4
     embedder.task_type = "RETRIEVAL_DOCUMENT"
     embedder.batch_size = 2
+    embedder.rate_limit_max_retries = 3
+    embedder.rate_limit_backoff_seconds = 0.0
     embedder._client = FakeClient()
 
     texts = ["a", "bb", "ccc", "dddd", "e"]
@@ -128,3 +130,106 @@ def test_gemini_embedder_splits_large_input_into_batches():
 
     assert embedder._client.models.calls == [["a", "bb"], ["ccc", "dddd"], ["e"]]
     assert vectors == [[1.0], [2.0], [3.0], [4.0], [1.0]]
+
+
+def _make_gemini_embedder(client, max_retries=3, backoff_seconds=0.0):
+    embedder = GeminiEmbedder.__new__(GeminiEmbedder)
+    embedder.model = "gemini-embedding-001"
+    embedder.dimension = 4
+    embedder.task_type = "RETRIEVAL_DOCUMENT"
+    embedder.batch_size = 10
+    embedder.rate_limit_max_retries = max_retries
+    embedder.rate_limit_backoff_seconds = backoff_seconds
+    embedder._client = client
+    return embedder
+
+
+def test_gemini_embedder_backs_off_and_retries_on_429_then_succeeds(monkeypatch):
+    """실사용 재현: 조문 단위로 잘게 쪼개 임베딩하다 보니(법령 하나에도
+    조문+부칙이 수십 건) 배치를 쉬지 않고 연달아 쏘면 분당 쿼터를 금방
+    다 써서 429 RESOURCE_EXHAUSTED가 났다. SDK 자체 재시도(tenacity)는
+    분당 한도가 풀리기엔 너무 짧게 기다려서 그대로 실패했다 -- 그래서
+    이 클래스가 한 번 더, 훨씬 길게(기본 60초) 기다렸다가 같은 배치를
+    재시도해야 한다."""
+    from google.genai.errors import ClientError
+
+    class FlakyModels:
+        def __init__(self):
+            self.calls = 0
+
+        def embed_content(self, model, contents, config):
+            self.calls += 1
+            if self.calls == 1:
+                raise ClientError(429, {"error": {"message": "RESOURCE_EXHAUSTED"}})
+            return {"embeddings": [{"values": [0.1, 0.2]} for _ in contents]}
+
+    class FakeClient:
+        def __init__(self):
+            self.models = FlakyModels()
+
+    client = FakeClient()
+    embedder = _make_gemini_embedder(client)
+
+    sleep_calls = []
+    monkeypatch.setattr("knowledge.embedder.time.sleep", lambda s: sleep_calls.append(s))
+
+    vectors = embedder.embed(["a", "b"])
+
+    assert vectors == [[0.1, 0.2], [0.1, 0.2]]
+    assert client.models.calls == 2  # 첫 시도 실패 + 재시도 성공
+    assert sleep_calls == [embedder.rate_limit_backoff_seconds]
+
+
+def test_gemini_embedder_gives_up_after_max_retries_on_persistent_429(monkeypatch):
+    from google.genai.errors import ClientError
+
+    class AlwaysRateLimitedModels:
+        def __init__(self):
+            self.calls = 0
+
+        def embed_content(self, model, contents, config):
+            self.calls += 1
+            raise ClientError(429, {"error": {"message": "RESOURCE_EXHAUSTED"}})
+
+    class FakeClient:
+        def __init__(self):
+            self.models = AlwaysRateLimitedModels()
+
+    client = FakeClient()
+    embedder = _make_gemini_embedder(client, max_retries=3)
+    monkeypatch.setattr("knowledge.embedder.time.sleep", lambda s: None)
+
+    with pytest.raises(ClientError):
+        embedder.embed(["a"])
+
+    assert client.models.calls == 3  # max_retries만큼만 시도하고 포기
+
+
+def test_gemini_embedder_does_not_retry_non_rate_limit_errors(monkeypatch):
+    """429가 아닌 에러(인증 실패, 잘못된 요청 등)는 재시도해도 어차피 또
+    실패할 뿐이니 곧바로 전파해야 한다 -- 쓸데없이 60초씩 기다리며 매달리면
+    안 된다."""
+    from google.genai.errors import ClientError
+
+    class AuthFailingModels:
+        def __init__(self):
+            self.calls = 0
+
+        def embed_content(self, model, contents, config):
+            self.calls += 1
+            raise ClientError(401, {"error": {"message": "invalid API key"}})
+
+    class FakeClient:
+        def __init__(self):
+            self.models = AuthFailingModels()
+
+    client = FakeClient()
+    embedder = _make_gemini_embedder(client)
+    sleep_calls = []
+    monkeypatch.setattr("knowledge.embedder.time.sleep", lambda s: sleep_calls.append(s))
+
+    with pytest.raises(ClientError):
+        embedder.embed(["a"])
+
+    assert client.models.calls == 1  # 재시도 없이 바로 전파
+    assert sleep_calls == []

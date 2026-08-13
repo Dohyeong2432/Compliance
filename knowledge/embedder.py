@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Sequence
 
@@ -127,6 +128,18 @@ class GeminiEmbedder(Embedder):
     account's total usage. Splitting into smaller requests doesn't help if
     the account's daily/per-minute quota itself is exhausted -- only a
     request that's too large in one shot.
+
+    Batches are fired back-to-back with no delay between them, so a large
+    first sync (this pipeline embeds one text per *article*, not per law --
+    a single sizable law/행정규칙 can already be dozens of articles+부칙,
+    and the watchlist has 164 of them) can burn through a per-minute
+    token/request quota in seconds even with small batch_size (실사용에서
+    재현: 429 RESOURCE_EXHAUSTED). google-genai's own tenacity-based retry
+    doesn't wait long enough for a per-minute window to reset. _embed_batch
+    catches that specific rate-limit error and backs off for
+    rate_limit_backoff_seconds (default 60s, matching a typical per-minute
+    quota window) before retrying the same batch, up to rate_limit_max_retries
+    times -- other errors (auth, malformed request, etc.) are not retried.
     """
 
     def __init__(
@@ -136,6 +149,8 @@ class GeminiEmbedder(Embedder):
         dimension: int = 768,
         task_type: str = "RETRIEVAL_DOCUMENT",
         batch_size: int = 10,
+        rate_limit_max_retries: int = 5,
+        rate_limit_backoff_seconds: float = 60.0,
     ):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
@@ -144,6 +159,8 @@ class GeminiEmbedder(Embedder):
         self.dimension = dimension
         self.task_type = task_type
         self.batch_size = batch_size
+        self.rate_limit_max_retries = rate_limit_max_retries
+        self.rate_limit_backoff_seconds = rate_limit_backoff_seconds
         self._client = self._build_client()
 
     def _build_client(self):
@@ -176,7 +193,20 @@ class GeminiEmbedder(Embedder):
         vectors: list[Vector] = []
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start : start + self.batch_size]
-            request = self._build_request(batch)
-            response = self._client.models.embed_content(**request)
-            vectors.extend(self._parse_response(response))
+            vectors.extend(self._embed_batch(batch))
         return vectors
+
+    def _embed_batch(self, batch: list[str]) -> list[Vector]:
+        from google.genai.errors import ClientError  # optional dependency, only needed for live calls
+
+        for attempt in range(self.rate_limit_max_retries):
+            try:
+                request = self._build_request(batch)
+                response = self._client.models.embed_content(**request)
+                return self._parse_response(response)
+            except ClientError as exc:
+                is_last_attempt = attempt == self.rate_limit_max_retries - 1
+                if getattr(exc, "code", None) != 429 or is_last_attempt:
+                    raise
+                time.sleep(self.rate_limit_backoff_seconds)
+        raise AssertionError("unreachable -- loop above always returns or raises")
