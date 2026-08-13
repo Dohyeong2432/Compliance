@@ -132,7 +132,14 @@ class GeminiLLMClient(LLMClient):
                 function_call = content.get("function_call")
                 if function_call:
                     id_to_name[function_call["id"]] = function_call["name"]
-                    parts.append({"function_call": {"name": function_call["name"], "args": function_call["args"]}})
+                    call_part = {"function_call": {"name": function_call["name"], "args": function_call["args"]}}
+                    if function_call.get("thought_signature") is not None:
+                        # Gemini's "thinking" models (3.x) reject a replayed function_call
+                        # part that's missing the thought_signature the model attached to
+                        # it originally (400 INVALID_ARGUMENT) -- it has to round-trip
+                        # unchanged from the response back into the next request's history.
+                        call_part["thought_signature"] = function_call["thought_signature"]
+                    parts.append(call_part)
                 contents.append({"role": "model", "parts": parts})
             else:  # role == "user" with a list of tool_result blocks appended by the harness
                 parts = [
@@ -154,7 +161,12 @@ class GeminiLLMClient(LLMClient):
         for part in parts:
             call = getattr(part, "function_call", None)
             if call is not None:
-                function_call = {"id": uuid.uuid4().hex, "name": call.name, "args": dict(call.args or {})}
+                function_call = {
+                    "id": uuid.uuid4().hex,
+                    "name": call.name,
+                    "args": dict(call.args or {}),
+                    "thought_signature": getattr(part, "thought_signature", None),
+                }
             elif getattr(part, "text", None):
                 text_chunks.append(part.text)
         text = "\n".join(text_chunks) or None

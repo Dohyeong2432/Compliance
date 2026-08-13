@@ -116,6 +116,58 @@ def test_parse_response_extracts_function_call_as_tool_call():
     assert result.raw["function_call"]["id"] == result.tool_call.id
 
 
+def test_parse_response_captures_thought_signature_on_function_call_part():
+    """Gemini 3.x(thinking) 모델은 함수 호출 part에 thought_signature를 함께
+    돌려주고, 이걸 다음 턴에 그대로 되돌려주지 않으면 400 INVALID_ARGUMENT를
+    낸다 -- 응답을 파싱할 때부터 놓치지 않고 잡아둬야 한다."""
+    client = _make_client()
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            function_call=SimpleNamespace(name="search_knowledge", args={"query": "은행법"}),
+                            text=None,
+                            thought_signature=b"opaque-signature-bytes",
+                        )
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = client._parse_response(response)
+
+    assert result.raw["function_call"]["thought_signature"] == b"opaque-signature-bytes"
+
+
+def test_build_contents_replays_thought_signature_on_function_call_part():
+    client = _make_client()
+    messages = [
+        {"role": "user", "content": "질문"},
+        {
+            "role": "assistant",
+            "content": {
+                "text": None,
+                "function_call": {
+                    "id": "call-1",
+                    "name": "search_knowledge",
+                    "args": {"query": "은행법"},
+                    "thought_signature": b"opaque-signature-bytes",
+                },
+            },
+        },
+    ]
+
+    contents = client._build_contents(messages)
+
+    assert contents[1]["parts"][0] == {
+        "function_call": {"name": "search_knowledge", "args": {"query": "은행법"}},
+        "thought_signature": b"opaque-signature-bytes",
+    }
+
+
 def test_parse_response_extracts_plain_text_when_no_function_call():
     client = _make_client()
     response = SimpleNamespace(
