@@ -22,6 +22,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agent.harness import ComplianceAgent
@@ -30,6 +31,21 @@ from agent.sso import SSOAuthError, SSOConfigError, build_session_context
 from bootstrap import AppComponents, build_components
 
 logger = logging.getLogger("compliance_agent")
+
+
+class UTF8JSONResponse(JSONResponse):
+    """Starlette's default JSONResponse sends "Content-Type: application/json"
+    with no charset param. RFC 8259 makes UTF-8 the mandatory default for JSON
+    without one, but Windows PowerShell 5.1's Invoke-RestMethod (built on the
+    legacy HttpWebRequest, not HttpClient) doesn't follow that default and
+    guesses a single-byte encoding instead -- silently mangling every non-ASCII
+    (e.g. Korean) character in the response before it even reaches the
+    console, no client-side console/encoding fix can undo that. Declaring the
+    charset explicitly fixes it for that client and is harmless for every
+    other client that already assumed UTF-8.
+    """
+
+    media_type = "application/json; charset=utf-8"
 
 
 @asynccontextmanager
@@ -57,7 +73,7 @@ async def lifespan(app: FastAPI):
             await sync_task
 
 
-app = FastAPI(title="Group AI Compliance Agent", lifespan=lifespan)
+app = FastAPI(title="Group AI Compliance Agent", lifespan=lifespan, default_response_class=UTF8JSONResponse)
 
 
 class ChatRequest(BaseModel):

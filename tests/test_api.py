@@ -116,6 +116,9 @@ def test_chat_happy_path_verifies_citation(api_env, monkeypatch):
     body = response.json()
     assert "law:1" in body["verified_citations"]
     assert "[1]" in body["answer"]
+    # Without an explicit charset, Windows PowerShell 5.1's Invoke-RestMethod
+    # mis-decodes non-ASCII (e.g. Korean) response bytes -- see UTF8JSONResponse.
+    assert response.headers["content-type"] == "application/json; charset=utf-8"
 
 
 def test_health_endpoint(api_env):
