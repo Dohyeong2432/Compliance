@@ -223,7 +223,7 @@ def test_open_law_or_reg_detail_by_name_tries_law_then_falls_back_to_reg(monkeyp
     def fake_open(browser, site_category, name):
         calls.append(site_category)
         if site_category == "law":
-            raise RuntimeError("not in law listing")
+            raise law_go_kr._NotInListingError("not in law listing")
         return None
 
     monkeypatch.setattr(law_go_kr, "open_law_detail_by_name", fake_open)
@@ -250,12 +250,32 @@ def test_open_law_or_reg_detail_by_name_returns_law_without_trying_reg(monkeypat
 
 def test_open_law_or_reg_detail_by_name_raises_when_neither_has_it(monkeypatch):
     def fake_open(browser, site_category, name):
-        raise RuntimeError("not found")
+        raise law_go_kr._NotInListingError("not found")
 
     monkeypatch.setattr(law_go_kr, "open_law_detail_by_name", fake_open)
 
     with pytest.raises(RuntimeError):
         open_law_or_reg_detail_by_name(MagicMock(), "존재하지않는법")
+
+
+def test_open_law_or_reg_detail_by_name_does_not_swallow_non_listing_failures(monkeypatch):
+    """실사용에서 재현된 오탐: 목록엔 있는데 다른 이유로(예: 숨겨진 뷰라
+    click_row_by_number가 행을 못 찾음) 실패한 경우는 "이 site_category엔
+    없음"이 아니다 -- law -> reg로 계속 넘어가며 삼켜서 결국 "어디에서도
+    찾지 못했다"는 오해성 메시지로 덮으면 안 되고, 실제 원인(click 실패
+    RuntimeError)이 그대로 드러나야 한다."""
+    calls = []
+
+    def fake_open(browser, site_category, name):
+        calls.append(site_category)
+        raise RuntimeError("번호 1에 해당하는 행을 현재 페이지에서 찾을 수 없습니다")
+
+    monkeypatch.setattr(law_go_kr, "open_law_detail_by_name", fake_open)
+
+    with pytest.raises(RuntimeError, match="번호 1"):
+        open_law_or_reg_detail_by_name(MagicMock(), "금융지주회사법")
+
+    assert calls == ["law"]  # reg로 넘어가며 삼켜지지 않고 law에서 바로 전파돼야 함
 
 
 def test_crawl_watchlist_items_skips_failures_and_continues(monkeypatch):
@@ -729,6 +749,43 @@ def test_open_law_detail_by_name_clicks_only_match_when_none_are_upcoming(monkey
     open_law_detail_by_name(MagicMock(), "law", "은행법")
 
     assert clicked == [1]
+
+
+def test_open_law_detail_by_name_raises_not_in_listing_error_when_no_match(monkeypatch):
+    """진짜 "이 목록엔 없음"인 경우는 _NotInListingError여야 한다 --
+    open_law_or_reg_detail_by_name()이 law -> reg로 넘어갈 때 이것만
+    구분해서 삼킨다."""
+    df = pd.DataFrame({"번호": ["1"], "법령명": ["다른법"], "_upcoming": [False]})
+
+    monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
+    monkeypatch.setattr(law_go_kr, "_goto_page_with_retry", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "_wait_for_fresh_table", lambda *a, **k: df)
+
+    with pytest.raises(law_go_kr._NotInListingError):
+        open_law_detail_by_name(MagicMock(), "law", "존재하지않는법")
+
+
+def test_open_law_detail_by_name_propagates_click_failure_as_plain_runtime_error(monkeypatch):
+    """행이 목록엔 있는데(예: 숨겨진 뷰라 Selenium이 못 찾음) 클릭 자체가
+    실패하는 경우는 _NotInListingError가 아니라 일반 RuntimeError로 그대로
+    드러나야 한다 -- open_law_or_reg_detail_by_name()이 이걸 "이 목록엔
+    없음"으로 오해해 삼키면 안 된다."""
+    df = pd.DataFrame({"번호": ["1"], "법령명": ["금융지주회사법"], "_upcoming": [False]})
+
+    monkeypatch.setattr(law_go_kr, "move_to_home", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "get_last_page_number", lambda *a, **k: 1)
+    monkeypatch.setattr(law_go_kr, "_goto_page_with_retry", lambda *a, **k: None)
+    monkeypatch.setattr(law_go_kr, "_wait_for_fresh_table", lambda *a, **k: df)
+
+    def fail_to_click(browser, n):
+        raise RuntimeError("번호 1에 해당하는 행을 현재 페이지에서 찾을 수 없습니다")
+
+    monkeypatch.setattr(law_go_kr, "click_row_by_number", fail_to_click)
+
+    with pytest.raises(RuntimeError, match="번호 1") as exc_info:
+        open_law_detail_by_name(MagicMock(), "law", "금융지주회사법")
+    assert not isinstance(exc_info.value, law_go_kr._NotInListingError)
 
 
 # ---------------------------------------------------------------------------

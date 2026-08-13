@@ -179,6 +179,17 @@ def click_next_page(browser: webdriver.Chrome) -> None:
 _UPCOMING_ALT = "앞으로 시행될 법령"
 
 
+class _NotInListingError(RuntimeError):
+    """검색 결과 목록에 이 이름이 아예 없다("이 site_category엔 없다")는
+    것만 나타내는 전용 예외. open_law_or_reg_detail_by_name()이 law -> reg로
+    넘어갈 때 이것만 삼켜야 한다. click_row_by_number()가 행을 못 찾거나
+    (실사용에서 확인됨: 목록 테이블이 display:none인 뷰에 있으면 Selenium의
+    .text가 항상 빈 문자열이라 못 찾는다), 페이지 이동/갱신이 실패하는 등
+    "목록엔 있는데 다른 이유로 실패"한 경우까지 일반 RuntimeError로 뭉뚱그려
+    같이 삼키면, 진짜 원인이 "어디에서도 찾지 못했다"는 오해성 메시지에
+    덮여버린다."""
+
+
 def _parse_listing_table(page_source: bs) -> pd.DataFrame:
     """목록 테이블 한 페이지를 텍스트로 파싱 (원본 get_page_table_info와 동일).
 
@@ -584,7 +595,7 @@ def open_law_detail_by_name(browser: webdriver.Chrome, site_category: str, law_n
         click_next_page(browser)
         time.sleep(0.5)
 
-    raise RuntimeError(f"'{law_name}'을(를) 목록에서 찾지 못했습니다")
+    raise _NotInListingError(f"'{law_name}'을(를) 목록에서 찾지 못했습니다")
 
 
 def fetch_law_item_by_name(browser: webdriver.Chrome, site_category: str, law_name: str) -> list[dict[str, Any]]:
@@ -610,12 +621,18 @@ def fetch_law_item_by_name(browser: webdriver.Chrome, site_category: str, law_na
 
 def open_law_or_reg_detail_by_name(browser: webdriver.Chrome, name: str) -> str:
     """name을 'law'(법령)에서 먼저 찾고, 없으면 'reg'(행정규칙)에서 찾아 상세
-    페이지를 연다. 찾아서 연 쪽의 site_category를 반환."""
+    페이지를 연다. 찾아서 연 쪽의 site_category를 반환.
+
+    _NotInListingError("이 site_category 목록엔 없음")만 삼키고 다음
+    site_category로 넘어간다 -- 그 외 RuntimeError(클릭 실패, 페이지 이동
+    실패 등 "목록엔 있는데 다른 이유로 실패")까지 같이 삼키면 실사용에서
+    실제로 겪은 것처럼 진짜 원인이 감춰지고 "어디에서도 찾지 못했다"는
+    오해성 메시지만 남는다 -- 그런 실패는 그대로 위로 전파해야 한다."""
     for site_category in ("law", "reg"):
         try:
             open_law_detail_by_name(browser, site_category, name)
             return site_category
-        except RuntimeError:
+        except _NotInListingError:
             continue
     raise RuntimeError(f"'{name}'을(를) 법령/행정규칙 목록 어디에서도 찾지 못했습니다")
 
