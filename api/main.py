@@ -91,7 +91,14 @@ def _build_llm_client() -> LLMClient:
     if backend == "anthropic":
         return AnthropicLLMClient()
     if backend == "gemini":
-        return GeminiLLMClient(model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"))
+        return GeminiLLMClient(
+            model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
+            # 채팅 응답 중 429(쿼터)/503(모델 과부하)를 만나면 잠깐 대기 후
+            # 재시도 -- GEMINI_EMBED_RATE_LIMIT_*와 동일한 목적이나, 임베딩과
+            # 채팅은 별도 쿼터/장애이므로 별도 env var로 뺀다.
+            rate_limit_max_retries=int(os.environ.get("GEMINI_CHAT_RATE_LIMIT_MAX_RETRIES", "5")),
+            rate_limit_backoff_seconds=float(os.environ.get("GEMINI_CHAT_RATE_LIMIT_BACKOFF_SECONDS", "60")),
+        )
     raise RuntimeError(f"Unknown LLM_BACKEND: {backend}")
 
 

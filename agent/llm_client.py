@@ -9,10 +9,17 @@ AnthropicLLMClient is the production implementation.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
+
+# 재시도 대상 HTTP 코드 -- 429(RESOURCE_EXHAUSTED, 분당/일일 쿼터 초과)와
+# 503(UNAVAILABLE, 모델 자체의 일시적 과부하) 둘 다 내 쪽 설정과 무관하게
+# 잠깐 기다리면 풀리는 일시적 오류라 재시도 대상. 401/400 등 나머지는
+# 재시도해도 어차피 또 실패하므로 그대로 던진다.
+_RETRYABLE_GEMINI_CODES = {429, 503}
 
 
 @dataclass
@@ -96,7 +103,14 @@ class GeminiLLMClient(LLMClient):
     installed -- only __init__ and generate() touch the actual SDK client.
     """
 
-    def __init__(self, model: str = "gemini-3.6-flash", api_key: str | None = None, max_output_tokens: int = 2048):
+    def __init__(
+        self,
+        model: str = "gemini-3.6-flash",
+        api_key: str | None = None,
+        max_output_tokens: int = 2048,
+        rate_limit_max_retries: int = 5,
+        rate_limit_backoff_seconds: float = 60.0,
+    ):
         api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set; cannot construct GeminiLLMClient")
@@ -106,6 +120,8 @@ class GeminiLLMClient(LLMClient):
         self._client = genai.Client(api_key=api_key)
         self.model = model
         self.max_output_tokens = max_output_tokens
+        self.rate_limit_max_retries = rate_limit_max_retries
+        self.rate_limit_backoff_seconds = rate_limit_backoff_seconds
 
     def _build_tools(self, tools: list[dict]) -> list[dict]:
         return [
@@ -178,13 +194,21 @@ class GeminiLLMClient(LLMClient):
         return LLMResponse(text=text, tool_call=tool_call, raw={"text": text, "function_call": function_call})
 
     def generate(self, system_prompt: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        response = self._client.models.generate_content(
-            model=self.model,
-            contents=self._build_contents(messages),
-            config={
-                "system_instruction": system_prompt,
-                "tools": self._build_tools(tools),
-                "max_output_tokens": self.max_output_tokens,
-            },
-        )
-        return self._parse_response(response)
+        from google.genai.errors import APIError  # optional dependency, only needed for live calls
+
+        contents = self._build_contents(messages)
+        config = {
+            "system_instruction": system_prompt,
+            "tools": self._build_tools(tools),
+            "max_output_tokens": self.max_output_tokens,
+        }
+        for attempt in range(self.rate_limit_max_retries):
+            try:
+                response = self._client.models.generate_content(model=self.model, contents=contents, config=config)
+                return self._parse_response(response)
+            except APIError as exc:
+                is_last_attempt = attempt == self.rate_limit_max_retries - 1
+                if getattr(exc, "code", None) not in _RETRYABLE_GEMINI_CODES or is_last_attempt:
+                    raise
+                time.sleep(self.rate_limit_backoff_seconds)
+        raise AssertionError("unreachable -- loop above always returns or raises")

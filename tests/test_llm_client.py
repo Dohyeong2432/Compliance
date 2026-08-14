@@ -19,7 +19,15 @@ def _make_client():
     client = GeminiLLMClient.__new__(GeminiLLMClient)
     client.model = "gemini-2.5-flash"
     client.max_output_tokens = 2048
+    client.rate_limit_max_retries = 3
+    client.rate_limit_backoff_seconds = 0.0
     return client
+
+
+def _text_only_response(text: str):
+    return SimpleNamespace(
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(function_call=None, text=text)]))]
+    )
 
 
 def test_gemini_llm_client_requires_api_key(monkeypatch):
@@ -185,3 +193,90 @@ def test_parse_response_extracts_plain_text_when_no_function_call():
     assert result.text == "답변입니다 [[CITE:doc-1]]"
     assert result.tool_call is None
     assert result.raw == {"text": "답변입니다 [[CITE:doc-1]]", "function_call": None}
+
+
+def test_gemini_llm_client_backs_off_and_retries_on_503_then_succeeds(monkeypatch):
+    """실사용 재현: 채팅 요청 도중 모델 쪽 일시 과부하(503 UNAVAILABLE)를
+    만났다 -- 내 쿼터 문제가 아니라 잠깐 기다리면 풀리는 오류이므로,
+    임베더와 동일하게 대기 후 같은 요청을 재시도해야 한다."""
+    from google.genai.errors import ServerError
+
+    class FlakyModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, model, contents, config):
+            self.calls += 1
+            if self.calls == 1:
+                raise ServerError(503, {"error": {"message": "UNAVAILABLE"}})
+            return _text_only_response("답변")
+
+    class FakeClient:
+        def __init__(self):
+            self.models = FlakyModels()
+
+    client = _make_client()
+    client._client = FakeClient()
+
+    sleep_calls = []
+    monkeypatch.setattr("agent.llm_client.time.sleep", lambda s: sleep_calls.append(s))
+
+    result = client.generate("system", [{"role": "user", "content": "질문"}], [])
+
+    assert result.text == "답변"
+    assert client._client.models.calls == 2  # 첫 시도 실패 + 재시도 성공
+    assert sleep_calls == [client.rate_limit_backoff_seconds]
+
+
+def test_gemini_llm_client_gives_up_after_max_retries_on_persistent_429(monkeypatch):
+    from google.genai.errors import ClientError
+
+    class AlwaysRateLimitedModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, model, contents, config):
+            self.calls += 1
+            raise ClientError(429, {"error": {"message": "RESOURCE_EXHAUSTED"}})
+
+    class FakeClient:
+        def __init__(self):
+            self.models = AlwaysRateLimitedModels()
+
+    client = _make_client()
+    client._client = FakeClient()
+    monkeypatch.setattr("agent.llm_client.time.sleep", lambda s: None)
+
+    with pytest.raises(ClientError):
+        client.generate("system", [{"role": "user", "content": "질문"}], [])
+
+    assert client._client.models.calls == client.rate_limit_max_retries
+
+
+def test_gemini_llm_client_does_not_retry_non_retryable_errors(monkeypatch):
+    """429/503이 아닌 에러(인증 실패 등)는 재시도해도 어차피 또 실패하므로
+    곧바로 전파해야 한다."""
+    from google.genai.errors import ClientError
+
+    class AuthFailingModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, model, contents, config):
+            self.calls += 1
+            raise ClientError(401, {"error": {"message": "invalid API key"}})
+
+    class FakeClient:
+        def __init__(self):
+            self.models = AuthFailingModels()
+
+    client = _make_client()
+    client._client = FakeClient()
+    sleep_calls = []
+    monkeypatch.setattr("agent.llm_client.time.sleep", lambda s: sleep_calls.append(s))
+
+    with pytest.raises(ClientError):
+        client.generate("system", [{"role": "user", "content": "질문"}], [])
+
+    assert client._client.models.calls == 1  # 재시도 없이 바로 전파
+    assert sleep_calls == []
