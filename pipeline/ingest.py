@@ -17,8 +17,16 @@ from knowledge.embedder import Embedder, Vector
 from knowledge.graph_store import GraphStore
 from knowledge.vector_store import VectorRecord, VectorStore
 from ontology.schema import Entity, EntityType, Relation
+from pipeline.citation_extraction import extract_citation_relations
 from pipeline.connectors.base import RawDocument, SourceConnector
 from pipeline.masking import mask_pii
+
+# 이 타입들만 본문에서 법령 인용("「OO법」 제N조" 등)을 자동 스캔해 CITES
+# 관계를 만든다 -- LAW/REGULATION 자체는 인용의 "대상"이지 "출처"가
+# 아니므로 제외한다 (법이 다른 법을 인용하는 경우도 있지만 지금 범위 밖).
+_AUTO_CITATION_SOURCE_TYPES = frozenset(
+    {EntityType.INTERPRETATION, EntityType.CASE, EntityType.REVIEW, EntityType.FAQ}
+)
 
 
 class IngestPipeline:
@@ -133,6 +141,10 @@ class IngestPipeline:
         for doc, entity in zip(documents, entities):
             for relation_type, target_id in doc.relations:
                 self.graph_store.add_relation(Relation(entity.id, relation_type, target_id))
+            if entity.type in _AUTO_CITATION_SOURCE_TYPES:
+                citation_text = f"{entity.title}\n{entity.body}"
+                for relation_type, target_id in extract_citation_relations(citation_text, self.graph_store):
+                    self.graph_store.add_relation(Relation(entity.id, relation_type, target_id))
 
         self.vector_store.upsert(
             [
