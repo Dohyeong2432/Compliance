@@ -140,3 +140,39 @@ def test_no_article_citation_in_query_skips_title_matching(retriever):
     hr, _, _ = retriever
     docs = hr.retrieve("노인 보호 기준", dept="RETAIL", as_of=date(2024, 1, 1))
     assert all(d.reason != "citation_match" for d in docs)
+
+
+class _SpyEmbedder(HashEmbedder):
+    """embed_query()가 실제로 호출되는지 감시하되, 임베딩 결과 자체는
+    HashEmbedder와 동일해야 vector_store에 미리 심어둔 벡터와 비교가
+    맞는다(순수 결정론적 해시라 새 인스턴스여도 같은 텍스트는 같은 벡터)."""
+
+    def __init__(self):
+        super().__init__()
+        self.embed_query_calls: list[str] = []
+        self.embed_one_calls: list[str] = []
+
+    def embed_query(self, text):
+        self.embed_query_calls.append(text)
+        return super().embed_query(text)
+
+    def embed_one(self, text):
+        self.embed_one_calls.append(text)
+        return super().embed_one(text)
+
+
+def test_retrieve_embeds_the_query_via_embed_query_not_embed_one():
+    """Voyage/Gemini는 질의와 문서를 다르게 임베딩해야 하는 비대칭
+    임베딩 API라, retriever가 질의를 embed_one()(문서용)이 아니라
+    embed_query()(질의 전용)으로 넣어야 한다 -- 실사용에서 이걸 놓쳐서
+    "업무위탁과 관련된 조항" 같은 순수 의미 검색이 제목에 정확히
+    "업무위탁"이 들어간 조문조차 못 찾는 문제가 있었다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    _seed(graph_store, vector_store)
+    spy = _SpyEmbedder()
+    hr = HybridRetriever(spy, vector_store, graph_store)
+
+    hr.retrieve("노인 보호 기준", dept="RETAIL", as_of=date(2024, 1, 1))
+
+    assert spy.embed_query_calls == ["노인 보호 기준"]

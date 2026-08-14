@@ -91,7 +91,7 @@ class HybridRetriever:
                 seen_ids.add(resolved.id)
                 documents.append(RetrievedDocument(resolved, 1.0, "citation_match"))
 
-        query_vector = self.embedder.embed_one(query)
+        query_vector = self.embedder.embed_query(query)
         candidates = self.vector_store.search(query_vector, top_k=top_k, dept=dept, as_of=as_of)
 
         for match in candidates:

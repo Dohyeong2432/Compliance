@@ -58,6 +58,37 @@ def test_voyage_embedder_request_and_response_parsing_without_network(monkeypatc
         embedder._parse_response({})
 
 
+def test_voyage_embedder_embed_query_uses_query_input_type_not_document():
+    """실사용에서 확인된 버그: 색인할 때도 검색할 때도 input_type="document"로
+    같은 embed()를 썼더니, 제목에 질의어가 그대로 들어간 조문조차 순수 의미
+    검색에서 top_k 밖으로 밀려났다. Voyage의 비대칭 임베딩(질의는
+    input_type="query")을 쓰도록 embed_query()가 분리 호출해야 한다."""
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def embed(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"embeddings": [[0.9, 0.1]]}
+
+    embedder = VoyageEmbedder.__new__(VoyageEmbedder)
+    embedder.model = "voyage-3"
+    embedder.dimension = 4
+    embedder.input_type = "document"
+    embedder._client = FakeClient()
+
+    vector = embedder.embed_query("업무위탁과 관련된 조항 찾아줄래?")
+
+    assert vector == [0.9, 0.1]
+    assert embedder._client.calls == [
+        {"texts": ["업무위탁과 관련된 조항 찾아줄래?"], "model": "voyage-3", "input_type": "query"}
+    ]
+    # embed()로 문서를 색인할 때는 여전히 input_type="document"를 써야 한다 (회귀 방지)
+    embedder.embed(["조문 본문"])
+    assert embedder._client.calls[-1]["input_type"] == "document"
+
+
 def test_gemini_embedder_requires_api_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
@@ -86,6 +117,49 @@ def test_gemini_embedder_request_and_response_parsing_without_network(monkeypatc
 
     with pytest.raises(ValueError):
         embedder._parse_response({})
+
+
+def test_gemini_embedder_embed_query_uses_retrieval_query_task_type_not_document():
+    """Voyage 쪽과 동일한 버그의 Gemini 버전: task_type="RETRIEVAL_DOCUMENT"
+    고정으로 질의까지 임베딩하고 있었다 -- embed_query()는 반드시
+    RETRIEVAL_QUERY를 써야 하고, 문서 색인 경로(embed())는 그대로
+    RETRIEVAL_DOCUMENT를 유지해야 한다."""
+
+    class FakeModels:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def embed_content(self, model, contents, config):
+            self.calls.append({"model": model, "contents": list(contents), "config": config})
+            return {"embeddings": [{"values": [0.7, 0.3]} for _ in contents]}
+
+    class FakeClient:
+        def __init__(self):
+            self.models = FakeModels()
+
+    embedder = GeminiEmbedder.__new__(GeminiEmbedder)
+    embedder.model = "gemini-embedding-001"
+    embedder.dimension = 4
+    embedder.task_type = "RETRIEVAL_DOCUMENT"
+    embedder.batch_size = 10
+    embedder.rate_limit_max_retries = 3
+    embedder.rate_limit_backoff_seconds = 0.0
+    embedder._client = FakeClient()
+
+    vector = embedder.embed_query("업무위탁과 관련된 조항 찾아줄래?")
+
+    assert vector == [0.7, 0.3]
+    assert embedder._client.models.calls[-1]["config"]["task_type"] == "RETRIEVAL_QUERY"
+
+    embedder.embed(["조문 본문"])
+    assert embedder._client.models.calls[-1]["config"]["task_type"] == "RETRIEVAL_DOCUMENT"
+
+
+def test_hash_embedder_embed_query_falls_back_to_embed_one():
+    """HashEmbedder는 비대칭 임베딩을 지원하지 않으므로(순수 문자 n-gram
+    해시), embed_query()도 embed_one()과 동일한 결과를 내야 한다."""
+    embedder = HashEmbedder(dimension=32)
+    assert embedder.embed_query("아무 질의") == embedder.embed_one("아무 질의")
 
 
 def test_gemini_embedder_parses_sdk_style_response_objects(monkeypatch):

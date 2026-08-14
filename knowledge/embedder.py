@@ -29,6 +29,23 @@ class Embedder(ABC):
     def embed_one(self, text: str) -> Vector:
         return self.embed([text])[0]
 
+    def embed_query(self, text: str) -> Vector:
+        """Embeds a search query rather than a document to be indexed.
+
+        Default falls back to embed_one() (symmetric embedding -- no
+        query/document distinction to make, as with HashEmbedder).
+        VoyageEmbedder and GeminiEmbedder override this: their APIs support
+        *asymmetric* embeddings, where a document and a query for that same
+        document are embedded differently (input_type="query" vs "document",
+        task_type RETRIEVAL_QUERY vs RETRIEVAL_DOCUMENT) so the two vector
+        spaces align for similarity search. Retrieval callers (HybridRetriever)
+        must call this, not embed_one(), when embedding the user's query --
+        embedding a query as if it were a document measurably hurts ranking
+        (실사용에서 확인: "업무위탁과 관련된 조항" 같은 순수 의미 검색 질의가,
+        정확히 그 제목을 가진 조문을 top_k 안에도 못 끌어올렸다).
+        """
+        return self.embed_one(text)
+
 
 class HashEmbedder(Embedder):
     """Deterministic character n-gram hashing embedder.
@@ -94,8 +111,8 @@ class VoyageEmbedder(Embedder):
 
         return voyageai.Client(api_key=self.api_key)
 
-    def _build_request(self, texts: Sequence[str]) -> dict:
-        return {"texts": list(texts), "model": self.model, "input_type": self.input_type}
+    def _build_request(self, texts: Sequence[str], input_type: str | None = None) -> dict:
+        return {"texts": list(texts), "model": self.model, "input_type": input_type or self.input_type}
 
     def _parse_response(self, response) -> list[Vector]:
         embeddings = getattr(response, "embeddings", None)
@@ -109,6 +126,11 @@ class VoyageEmbedder(Embedder):
         request = self._build_request(texts)
         response = self._client.embed(**request)
         return self._parse_response(response)
+
+    def embed_query(self, text: str) -> Vector:
+        request = self._build_request([text], input_type="query")
+        response = self._client.embed(**request)
+        return self._parse_response(response)[0]
 
 
 class GeminiEmbedder(Embedder):
@@ -168,11 +190,11 @@ class GeminiEmbedder(Embedder):
 
         return genai.Client(api_key=self.api_key)
 
-    def _build_request(self, texts: Sequence[str]) -> dict:
+    def _build_request(self, texts: Sequence[str], task_type: str | None = None) -> dict:
         return {
             "model": self.model,
             "contents": list(texts),
-            "config": {"task_type": self.task_type, "output_dimensionality": self.dimension},
+            "config": {"task_type": task_type or self.task_type, "output_dimensionality": self.dimension},
         }
 
     def _parse_response(self, response) -> list[Vector]:
@@ -196,12 +218,15 @@ class GeminiEmbedder(Embedder):
             vectors.extend(self._embed_batch(batch))
         return vectors
 
-    def _embed_batch(self, batch: list[str]) -> list[Vector]:
+    def embed_query(self, text: str) -> Vector:
+        return self._embed_batch([text], task_type="RETRIEVAL_QUERY")[0]
+
+    def _embed_batch(self, batch: list[str], task_type: str | None = None) -> list[Vector]:
         from google.genai.errors import ClientError  # optional dependency, only needed for live calls
 
         for attempt in range(self.rate_limit_max_retries):
             try:
-                request = self._build_request(batch)
+                request = self._build_request(batch, task_type=task_type)
                 response = self._client.models.embed_content(**request)
                 return self._parse_response(response)
             except ClientError as exc:
