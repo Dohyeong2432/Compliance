@@ -106,9 +106,11 @@ def test_ingest_auto_extracts_law_citation_relations_from_interpretation_body():
 
 
 def test_ingest_auto_citation_extraction_only_applies_to_citing_source_types():
-    """LAW/REGULATION 문서 자체는 인용 스캔 대상이 아니다(인용의 '대상'이지
-    '출처'가 아님) -- 법령 본문에 다른 법 조항이 언급돼도 자동으로 CITES가
-    생기면 안 된다."""
+    """LAW 문서 자체는 인용 스캔 대상이 아니다(인용의 '대상'이지 '출처'가
+    아님) -- 법령 본문에 다른 법 조항이 언급돼도 자동으로 CITES가 생기면
+    안 된다. (REGULATION은 사규가 자신의 근거 법조항을 인용하는 실제
+    사례가 있어 스캔 대상이다 -- 아래
+    test_ingest_regulation_body_is_scanned_for_law_citations 참고.)"""
     graph_store = NetworkXGraphStore()
     vector_store = InMemoryVectorStore()
     pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store)
@@ -125,6 +127,34 @@ def test_ingest_auto_citation_extraction_only_applies_to_citing_source_types():
     pipeline.ingest_documents(docs)
 
     assert graph_store.relations_from("law:47-0", RelationType.CITES) == []
+
+
+def test_ingest_regulation_body_is_scanned_for_law_citations():
+    """사규 조문이 자신의 근거 법조항을 「」로 인용하면(관행적 표기), 그
+    법조항 entity로 CITES가 자동 생성돼야 한다 -- 법 개정 시 "이 조항을
+    인용하는 사규가 뭐가 있는지"를 그래프로 역추적하기 위한 전제."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store)
+
+    docs = [
+        RawDocument(
+            external_id="47-0",
+            entity_type=EntityType.LAW,
+            title="금융지주회사법 제47조(자회사등 사이의 업무위탁)",
+            body="자회사등은 업무의 일부를 다른 자회사등에게 위탁할 수 있다.",
+        ),
+        RawDocument(
+            external_id="64-1",
+            entity_type=EntityType.REGULATION,
+            title="업무위탁운용지침 제1조(목적)",
+            body="이 지침은 「금융지주회사법」 제47조에 따라 업무 위탁에 관한 사항을 정한다.",
+        ),
+    ]
+    pipeline.ingest_documents(docs)
+
+    rels = graph_store.relations_from("regulation:64-1", RelationType.CITES)
+    assert [r.target_id for r in rels] == ["law:47-0"]
 
 
 def test_ingest_populates_vector_store():

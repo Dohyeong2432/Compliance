@@ -26,7 +26,7 @@ from pipeline.masking import mask_pii
 # 관계를 만든다 -- LAW/REGULATION 자체는 인용의 "대상"이지 "출처"가
 # 아니므로 제외한다 (법이 다른 법을 인용하는 경우도 있지만 지금 범위 밖).
 _AUTO_CITATION_SOURCE_TYPES = frozenset(
-    {EntityType.INTERPRETATION, EntityType.CASE, EntityType.REVIEW, EntityType.FAQ}
+    {EntityType.INTERPRETATION, EntityType.CASE, EntityType.REVIEW, EntityType.FAQ, EntityType.REGULATION}
 )
 
 
