@@ -50,6 +50,15 @@ class GraphStore(ABC):
     def relations_to(self, entity_id: str, type: RelationType | None = None) -> list[Relation]:
         ...
 
+    @abstractmethod
+    def find_entities_by_title_substring(self, needle: str) -> list[Entity]:
+        """title에 needle이 (대소문자 구분) 부분 문자열로 포함된 엔티티를 전부
+        반환한다. "제N조" 같은 정확한 조문 인용 질의는 그 자체로는 의미
+        정보가 거의 없어서(HybridRetriever가 top_k를 20까지 늘려도 실사용에서
+        벡터 유사도 검색만으로는 상위권에 못 드는 게 재현됨), 이 직접 문자열
+        매칭으로 보강한다."""
+        ...
+
     # ---- shared logic built on the primitives above ----
 
     def supersede_chain(self, entity_id: str) -> list[Entity]:
@@ -181,6 +190,9 @@ class NetworkXGraphStore(GraphStore):
             if type is None or data["type"] == type:
                 out.append(Relation(source, data["type"], entity_id, data.get("metadata", {})))
         return out
+
+    def find_entities_by_title_substring(self, needle: str) -> list[Entity]:
+        return [data["entity"] for _, data in self._graph.nodes(data=True) if needle in data["entity"].title]
 
 
 class KuzuGraphStore(GraphStore):
@@ -324,3 +336,14 @@ class KuzuGraphStore(GraphStore):
             rel_type, source_id = result.get_next()
             out.append(Relation(source_id, RelationType(rel_type), entity_id))
         return out
+
+    def find_entities_by_title_substring(self, needle: str) -> list[Entity]:
+        result = self._conn.execute(
+            "MATCH (e:Entity) WHERE e.title CONTAINS $needle RETURN e.id, e.type, e.title, e.body, "
+            "e.effective_date, e.superseded_date, e.allowed_depts, e.source",
+            parameters={"needle": needle},
+        )
+        entities = []
+        while result.has_next():
+            entities.append(self._row_to_entity(result.get_next()))
+        return entities

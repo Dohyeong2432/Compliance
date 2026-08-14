@@ -95,3 +95,48 @@ def test_expansion_pulls_in_related_case(retriever):
     ids = {d.entity.id for d in docs}
     assert "law:new" in ids
     assert "case:1" in ids
+
+
+def test_citation_query_finds_article_that_vector_search_would_miss(retriever):
+    """"제N조" 같은 정확한 조문 인용 질의는 그 자체로 의미 정보가 거의
+    없어서 임베딩 유사도만으로는 상위권에 못 들 수 있다(실사용에서
+    top_k=20까지 늘려도 재현됨) -- title 직접 매칭으로 찾아내야 한다.
+    이걸 확인하려고 벡터는 질의와 전혀 무관한 텍스트로 임베딩해뒀다(순수
+    벡터 검색이라면 top_k=1에서 절대 안 걸림)."""
+    hr, graph_store, vector_store = retriever
+    article = Entity("law:art5", EntityType.LAW, "노인 보호법 제5조(위임)", "이 조항은 세부사항을 대통령령에 위임한다.")
+    graph_store.add_entity(article)
+    vector_store.upsert(
+        [VectorRecord("law:art5", EMB.embed_one("완전히 무관한 다른 주제의 텍스트"), article.body)]
+    )
+
+    docs = hr.retrieve("노인 보호법 제5조가 뭐야?", dept="RETAIL", as_of=date(2024, 1, 1), top_k=1)
+
+    matched = next((d for d in docs if d.entity.id == "law:art5"), None)
+    assert matched is not None
+    assert matched.reason == "citation_match"
+
+
+def test_citation_query_does_not_bypass_rbac(retriever):
+    """조문 인용 직접 매칭도 다른 경로와 동일하게 RBAC를 통과해야 한다 --
+    지름길이라고 부서 제한을 우회하면 안 된다."""
+    hr, graph_store, vector_store = retriever
+    restricted = Entity(
+        "review:art9", EntityType.REVIEW, "제9조 관련 IB 전용 검토서", "IB 한정 내용", allowed_depts=("IB",)
+    )
+    graph_store.add_entity(restricted)
+    vector_store.upsert([VectorRecord("review:art9", EMB.embed_one("무관한 텍스트"), restricted.body)])
+
+    retail_docs = hr.retrieve("제9조가 뭐야?", dept="RETAIL", as_of=date(2024, 1, 1))
+    ib_docs = hr.retrieve("제9조가 뭐야?", dept="IB", as_of=date(2024, 1, 1))
+
+    assert "review:art9" not in {d.entity.id for d in retail_docs}
+    assert "review:art9" in {d.entity.id for d in ib_docs}
+
+
+def test_no_article_citation_in_query_skips_title_matching(retriever):
+    """조문 번호 언급이 없는 일반 질의는 citation_match 경로를 아예 안
+    타야 한다(불필요한 전체 title 스캔 방지)."""
+    hr, _, _ = retriever
+    docs = hr.retrieve("노인 보호 기준", dept="RETAIL", as_of=date(2024, 1, 1))
+    assert all(d.reason != "citation_match" for d in docs)

@@ -141,6 +141,29 @@ def test_delete_entity_also_drops_its_relations(graph_store):
     assert graph_store.relations_to("law:1", RelationType.VIOLATES) == []
 
 
+def test_find_entities_by_title_substring_matches_exact_article_only(graph_store):
+    """"제2조"로 검색하면 "제20조"(부분문자열 아님)는 걸리지 않고 "제2조"만
+    걸려야 한다 -- 조문 인용 검색의 정확도가 여기 달려있다."""
+    graph_store.add_entity(
+        Entity(id="law:1-0", type=EntityType.LAW, title="금융지주회사법 제1조(목적)", body="본문")
+    )
+    graph_store.add_entity(
+        Entity(id="law:2-0", type=EntityType.LAW, title="금융지주회사법 제2조(정의)", body="본문")
+    )
+    graph_store.add_entity(
+        Entity(id="law:20-0", type=EntityType.LAW, title="금융지주회사법 제20조(승인)", body="본문")
+    )
+
+    matches = graph_store.find_entities_by_title_substring("제2조")
+
+    assert {e.id for e in matches} == {"law:2-0"}
+
+
+def test_find_entities_by_title_substring_no_match_returns_empty(graph_store):
+    graph_store.add_entity(_law("law:1"))
+    assert graph_store.find_entities_by_title_substring("전혀 없는 문구") == []
+
+
 def test_expand_related_defaults_exclude_supersedes(graph_store):
     graph_store.add_entity(_law("law:v1", date(2020, 1, 1), date(2022, 1, 1)))
     graph_store.add_entity(_law("law:v2", date(2022, 1, 1)))
