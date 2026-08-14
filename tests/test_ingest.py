@@ -240,3 +240,39 @@ def test_no_embed_cache_path_means_every_ingest_recomputes():
     pipeline.ingest_documents([_doc()])
 
     assert embedder.embedded_texts == ["법령\n법령 본문", "법령\n법령 본문"]
+
+
+def test_ingest_populates_lexical_index_when_one_is_attached():
+    from knowledge.lexical import LexicalIndex
+
+    lexical_index = LexicalIndex()
+    pipeline = IngestPipeline(
+        HashEmbedder(), InMemoryVectorStore(), NetworkXGraphStore(), lexical_index=lexical_index
+    )
+    pipeline.ingest_documents(
+        [RawDocument(external_id="1", entity_type=EntityType.LAW, title="업무위탁 조항", body="본문")]
+    )
+
+    assert [m.entity_id for m in lexical_index.search("업무위탁")] == ["law:1"]
+
+
+def test_ingest_without_lexical_index_still_works():
+    """어휘 색인은 선택 요소다 -- 안 붙여도 기존 경로가 그대로 동작해야 한다."""
+    pipeline = IngestPipeline(HashEmbedder(), InMemoryVectorStore(), NetworkXGraphStore())
+    assert pipeline.ingest_documents([_doc()]) == 1
+
+
+def test_lexical_index_reflects_updated_body_on_reingest():
+    """sync가 매 사이클 전체 문서를 재색인하므로, 본문이 바뀌면 옛 용어가
+    색인에 남아 있으면 안 된다."""
+    from knowledge.lexical import LexicalIndex
+
+    lexical_index = LexicalIndex()
+    pipeline = IngestPipeline(
+        HashEmbedder(), InMemoryVectorStore(), NetworkXGraphStore(), lexical_index=lexical_index
+    )
+    pipeline.ingest_documents([_doc(body="업무위탁 관련 내용")])
+    pipeline.ingest_documents([_doc(body="겸직 제한 관련 내용")])
+
+    assert lexical_index.search("업무위탁") == []
+    assert [m.entity_id for m in lexical_index.search("겸직")] == ["law:l1"]

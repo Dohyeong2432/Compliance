@@ -118,6 +118,8 @@ class IngestSyncer:
             for entity_id in removed_ids:
                 self.graph_store.delete_entity(entity_id)
                 self.vector_store.delete(entity_id)
+                if self.pipeline.lexical_index is not None:
+                    self.pipeline.lexical_index.delete(entity_id)
             result.removed = len(removed_ids)
 
             try:

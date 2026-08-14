@@ -28,6 +28,8 @@ from agent.audit import AuditLogger
 from agent.sso import SSOConfig
 from knowledge.embedder import Embedder, GeminiEmbedder, HashEmbedder, VoyageEmbedder
 from knowledge.graph_store import GraphStore, KuzuGraphStore, NetworkXGraphStore
+from knowledge.lexical import LexicalIndex
+from knowledge.reranker import NoOpReranker, Reranker, VoyageReranker
 from knowledge.retriever import HybridRetriever
 from knowledge.vector_store import ChromaVectorStore, InMemoryVectorStore, VectorStore
 from pipeline.connectors.base import SourceConnector
@@ -75,6 +77,18 @@ def _build_embedder() -> Embedder:
             rate_limit_backoff_seconds=float(os.environ.get("GEMINI_EMBED_RATE_LIMIT_BACKOFF_SECONDS", "60")),
         )
     raise RuntimeError(f"Unknown EMBEDDER_BACKEND: {backend}")
+
+
+def _build_reranker() -> Reranker:
+    """리랭커는 기본 비활성(none)이다 -- 검색 정확도 향상 폭은 크지만 질의마다
+    외부 API 호출이 한 번 더 붙어 지연·비용이 늘기 때문에, 켜는 것은 배포
+    환경의 선택으로 남긴다. 끄더라도 검색 경로 자체는 동일하게 동작한다."""
+    backend = os.environ.get("RERANKER_BACKEND", "none").lower()
+    if backend in ("none", ""):
+        return NoOpReranker()
+    if backend == "voyage":
+        return VoyageReranker(model=os.environ.get("VOYAGE_RERANK_MODEL", "rerank-2.5"))
+    raise RuntimeError(f"Unknown RERANKER_BACKEND: {backend}")
 
 
 def _build_vector_store() -> VectorStore:
@@ -157,7 +171,16 @@ def build_components() -> AppComponents:
     embedder = _build_embedder()
     vector_store = _build_vector_store()
     graph_store = _build_graph_store()
-    retriever = HybridRetriever(embedder, vector_store, graph_store)
+    # BM25 어휘 색인은 메모리 상주. 아래 IngestPipeline과 HybridRetriever가
+    # 같은 인스턴스를 공유해야 색인한 것을 검색할 수 있다.
+    lexical_index = LexicalIndex()
+    retriever = HybridRetriever(
+        embedder,
+        vector_store,
+        graph_store,
+        lexical_index=lexical_index,
+        reranker=_build_reranker(),
+    )
     audit_logger = AuditLogger(os.environ.get("AUDIT_LOG_PATH", "./data/audit.jsonl"))
     sso_config = SSOConfig.from_env()
 
@@ -166,6 +189,7 @@ def build_components() -> AppComponents:
         vector_store,
         graph_store,
         embed_cache_path=os.environ.get("EMBED_CACHE_PATH", "./data/embed_cache.json"),
+        lexical_index=lexical_index,
     )
     syncer = IngestSyncer(
         pipeline=pipeline,

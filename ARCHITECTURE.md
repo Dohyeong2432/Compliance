@@ -14,6 +14,7 @@
 | 차이니즈월(RBAC) | "이 부서 문서는 보여주지 마" 지시는 우회 가능 | `dept`는 검증된 JWT 클레임에서만 파생(`agent/sso.py`), 도구 호출 인자로 override 불가(`agent/tools.py`) |
 | 시계열 인지 | 모델이 "최신 버전"을 스스로 추론 → 환각 위험 | `SUPERSEDES` 체인을 그래프에서 직접 탐색해 질의 시점에 유효했던 버전을 결정적으로 반환(`knowledge/graph_store.py`) |
 | 할루시네이션 방지 | "지어내지 마" 지시는 모델이 무시할 수 있음 | 벡터 검색 결과를 그래프 존재 여부로 교차검증하고, 답변의 `[[CITE:id]]`를 재검증해 통과분만 각주로 치환(`knowledge/retriever.py`, `agent/citation.py`) |
+| 근거의 규범적 위계 | "법령을 우선 근거로 삼아라" 지시만으로는 내부 검토서가 법령보다 먼저·같은 무게로 인용될 수 있음 | 검색 결과를 권위 순으로 정렬해 제시하고, 문서 블록마다 `authority` 속성으로 규범적 지위를 명시(`ontology/schema.py` AUTHORITY_RANK, `agent/tools.py`) |
 
 벡터 스토어 단독으로는 "그럴듯하게 유사한 텍스트"를 반환할 뿐 그 문서가 실제로
 존재하고 여전히 유효한지 보장하지 않습니다. 지식그래프를 두 번째 진실 소스로 두고
@@ -36,11 +37,19 @@
         무조건 신뢰도 하지 않음)
                         │
 [하이브리드 리트리버]  HybridRetriever.retrieve() (knowledge/retriever.py)
-   1. 벡터 스토어 top-K 후보 (이미 dept/시계열 1차 필터링됨)
-   2. 그래프 존재확인 — 그래프에 없는 id는 노이즈로 폐기 (환각 방지 핵심)
-   3. 시계열 최신판 치환 — SUPERSEDES 체인에서 as_of 시점 유효 버전으로 교체
-   4. RBAC 하드필터 — 치환된 버전에 대해 재검사(치환 전 버전과 다를 수 있으므로)
-   5. 1-hop 그래프 확장 — 관련 판례/해석/FAQ를 추가 컨텍스트로 편입
+   1. 조문 인용("제N조") title 직접 매칭 — 조문 번호는 임베딩이 잡을 의미 정보가
+      거의 없어 순수 벡터로는 못 찾음. 리랭킹 대상에서 제외해 보호
+   2. 후보 회수 2채널 — BM25 어휘 검색(knowledge/lexical.py, 정형 용어 정확 일치)
+      + 벡터 유사도 검색. 점수 스케일이 달라 RRF(순위 기반 융합)로 병합
+   3. 그래프 존재확인 — 그래프에 없는 id는 노이즈로 폐기 (환각 방지 핵심)
+   4. 시계열 최신판 치환 — SUPERSEDES 체인에서 as_of 시점 유효 버전으로 교체
+   5. RBAC 하드필터 — 치환된 버전에 대해 재검사(치환 전 버전과 다를 수 있으므로)
+   6. 리랭킹(knowledge/reranker.py) — (질의, 문서)를 함께 읽는 별도 모델로 후보
+      풀을 재채점. RERANKER_BACKEND=none이면 RRF 순위 그대로(NoOp)
+   7. 1-hop 그래프 확장 — 관련 판례/해석/FAQ를 추가 컨텍스트로 편입
+   8. 권위 위계 정렬 — 법령 > 사내규정 > 유권해석 > 제재사례 > 검토서 > FAQ
+      (ontology/schema.py AUTHORITY_RANK). 관련성이 "무엇을" 가져올지 정하고,
+      규범적 위계가 "어떤 순서로 LLM에 제시할지"를 정한다
                         │
 [지식 계층]  VectorStore(Chroma/InMemory) + GraphStore(Kuzu/NetworkX) + Embedder(Voyage/Hash)
                         │
@@ -121,9 +130,27 @@
 그대로 유지되며, `seed_data/seed.py`가 이 경로를 씁니다.
 
 ### `knowledge/retriever.py`
-`HybridRetriever.retrieve()`가 위 "전체 흐름"의 5단계를 그대로 구현합니다.
+`HybridRetriever.retrieve()`가 위 "전체 흐름"의 8단계를 그대로 구현합니다.
 `dept` 없이는 호출 자체가 `ValueError`로 거부됩니다 — RBAC를 생략한 검색 경로가
-아예 존재하지 않습니다.
+아예 존재하지 않습니다. 검색 경로가 4개(조문 인용/어휘/벡터/1-hop 확장)로 늘었지만
+권한·시점 판정은 `_resolve()` 한 곳에만 있습니다. `entity_types`로 소스를 한정할 수
+있고(도구의 `source_types` 파라미터), 이 필터는 4개 경로 전부에 동일하게 적용됩니다.
+
+### `knowledge/lexical.py`
+BM25 역색인. 임베딩은 "의미가 비슷한" 문서에 강하지만 정형 용어 정확 일치에는
+약한데, 법률 도메인은 반대로 "이해상충", "겸직"처럼 토씨 하나가 개념을 가르는
+용어 덩어리입니다. 한국어 형태소 분석기는 운영 부담이 커서 쓰지 않고, 어절 전체
+term(정확 일치, IDF 높음) + 문자 바이그램(부분 일치 흡수)을 함께 색인해 대체합니다.
+메모리 상주이며 매 sync 사이클 ingest가 다시 채우므로 별도 복구 절차가 없습니다.
+RBAC/시점 판정은 하지 않고 `(entity_id, score)`만 돌려줍니다 — 권한 판정 지점을
+늘리지 않기 위한 의도적 설계입니다.
+
+### `knowledge/reranker.py`
+회수 채널(벡터/BM25)은 질의와 문서를 따로 채점하지만, 리랭커는 둘을 함께 읽고
+관련성을 다시 매깁니다. 후보 20~30개를 그대로 LLM에 넣으면 상당수가 노이즈이고
+정답이 그 사이에 묻히는데, 이 구간을 담당합니다. 기본값은 `NoOpReranker`(자르기만
+수행) — 질의마다 외부 API 호출이 추가돼 지연·비용이 늘기 때문에 켜는 것은 배포
+환경의 선택(`RERANKER_BACKEND=voyage`)으로 남겼습니다.
 
 ### `agent/sso.py`
 `build_session_context()`가 `SessionContext`를 만드는 유일한 함수입니다. `dept`는

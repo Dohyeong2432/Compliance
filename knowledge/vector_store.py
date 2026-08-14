@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Sequence
 
-from ontology.schema import ALL_DEPARTMENTS
+from ontology.schema import ALL_DEPARTMENTS, EntityType, entity_type_from_id
 from knowledge.embedder import Vector
 
 # Calibrated for HashEmbedder's score distribution (cosine similarity over a
@@ -58,6 +58,15 @@ def _dept_visible(allowed_depts: Sequence[str], dept: str | None) -> bool:
     return dept in allowed_depts
 
 
+def _type_allowed(entity_id: str, entity_types: tuple[EntityType, ...] | None) -> bool:
+    """소스 타입 필터. 타입은 entity_id 접두사에서 복원하므로(schema의
+    entity_type_from_id) 레코드 스키마를 바꾸거나 기존 색인을 마이그레이션할
+    필요가 없다 -- id 형식 자체가 이미 타입을 담고 있다."""
+    if entity_types is None:
+        return True
+    return entity_type_from_id(entity_id) in entity_types
+
+
 def _effective_at(effective_date: date | None, superseded_date: date | None, as_of: date | None) -> bool:
     if as_of is None:
         return True
@@ -87,6 +96,7 @@ class VectorStore(ABC):
         top_k: int = 10,
         dept: str | None = None,
         as_of: date | None = None,
+        entity_types: tuple[EntityType, ...] | None = None,
     ) -> list[ScoredMatch]:
         ...
 
@@ -109,10 +119,13 @@ class InMemoryVectorStore(VectorStore):
         top_k: int = 10,
         dept: str | None = None,
         as_of: date | None = None,
+        entity_types: tuple[EntityType, ...] | None = None,
     ) -> list[ScoredMatch]:
         matches: list[ScoredMatch] = []
         for record in self._records.values():
             if not _dept_visible(record.allowed_depts, dept):
+                continue
+            if not _type_allowed(record.entity_id, entity_types):
                 continue
             if not _effective_at(record.effective_date, record.superseded_date, as_of):
                 continue
@@ -170,6 +183,7 @@ class ChromaVectorStore(VectorStore):
         top_k: int = 10,
         dept: str | None = None,
         as_of: date | None = None,
+        entity_types: tuple[EntityType, ...] | None = None,
     ) -> list[ScoredMatch]:
         fetch_n = max(top_k * 4, 20)
         result = self._collection.query(query_embeddings=[query_vector], n_results=fetch_n)
@@ -181,6 +195,8 @@ class ChromaVectorStore(VectorStore):
         for entity_id, distance, metadata in zip(ids, distances, metadatas):
             score = 1.0 - distance  # cosine distance -> cosine similarity
             if score < self.min_score:
+                continue
+            if not _type_allowed(entity_id, entity_types):
                 continue
             allowed_depts = tuple(metadata.get("allowed_depts", ALL_DEPARTMENTS).split(","))
             if not _dept_visible(allowed_depts, dept):

@@ -4,6 +4,8 @@ import pytest
 
 from knowledge.embedder import HashEmbedder
 from knowledge.graph_store import NetworkXGraphStore
+from knowledge.lexical import LexicalIndex
+from knowledge.reranker import RerankedItem, Reranker
 from knowledge.retriever import HybridRetriever
 from knowledge.vector_store import InMemoryVectorStore, VectorRecord
 from ontology.schema import Entity, EntityType, Relation, RelationType
@@ -176,3 +178,178 @@ def test_retrieve_embeds_the_query_via_embed_query_not_embed_one():
     hr.retrieve("노인 보호 기준", dept="RETAIL", as_of=date(2024, 1, 1))
 
     assert spy.embed_query_calls == ["노인 보호 기준"]
+
+
+# ---------------------------------------------------------------------------
+# 권위 위계 / BM25 어휘 채널 / 리랭커 / 소스 타입 필터
+# ---------------------------------------------------------------------------
+
+
+def _authority_fixture():
+    """같은 주제를 다루는 법령·사내규정·검토서를 한 벌 심는다. 벡터 유사도는
+    검토서가 가장 높도록(질의어를 그대로 포함) 만들어서, 관련성만으로 정렬하면
+    검토서가 1등이 되는 상황을 의도적으로 구성한다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    entities = [
+        Entity("law:1", EntityType.LAW, "금융지주회사법 제47조", "자회사등 사이의 업무위탁"),
+        Entity("regulation:1", EntityType.REGULATION, "업무위탁 운영지침", "업무위탁 내부 절차"),
+        Entity("review:1", EntityType.REVIEW, "업무위탁 검토서", "업무위탁 관련 내부 검토의견"),
+        Entity("faq:1", EntityType.FAQ, "업무위탁 FAQ", "업무위탁 자주 묻는 질문"),
+    ]
+    for entity in entities:
+        graph_store.add_entity(entity)
+        vector_store.upsert([VectorRecord(entity.id, EMB.embed_one(entity.title + entity.body), entity.body)])
+    return graph_store, vector_store
+
+
+def test_results_are_ordered_by_normative_authority_not_relevance_alone():
+    """검색 관련성이 아무리 높아도 검토서가 법령보다 먼저 제시되면 안 된다 --
+    준법 답변에서 내부 의견과 강행규범의 층위가 뒤섞이는 것은 랭킹 품질
+    문제가 아니라 컴플라이언스 리스크다."""
+    graph_store, vector_store = _authority_fixture()
+    hr = HybridRetriever(EMB, vector_store, graph_store)
+
+    docs = hr.retrieve("업무위탁", dept="RETAIL", as_of=date(2024, 1, 1), top_k=10)
+
+    types = [d.entity.type for d in docs]
+    assert types.index(EntityType.LAW) < types.index(EntityType.REGULATION)
+    assert types.index(EntityType.REGULATION) < types.index(EntityType.REVIEW)
+    assert types.index(EntityType.REVIEW) < types.index(EntityType.FAQ)
+
+
+def test_entity_types_filter_restricts_results_to_requested_sources():
+    graph_store, vector_store = _authority_fixture()
+    hr = HybridRetriever(EMB, vector_store, graph_store)
+
+    docs = hr.retrieve(
+        "업무위탁", dept="RETAIL", as_of=date(2024, 1, 1), top_k=10, entity_types=(EntityType.LAW,)
+    )
+
+    assert {d.entity.id for d in docs} == {"law:1"}
+
+
+def test_entity_types_filter_also_applies_to_citation_match_path():
+    """조문 인용 직접 매칭도 소스 필터를 따라야 한다 -- 우회 경로가 되면
+    "법령만 보여줘"가 지켜지지 않는다."""
+    graph_store, vector_store = _authority_fixture()
+    graph_store.add_entity(
+        Entity("review:art47", EntityType.REVIEW, "제47조 관련 검토서", "검토의견 본문")
+    )
+    hr = HybridRetriever(EMB, vector_store, graph_store)
+
+    docs = hr.retrieve(
+        "제47조가 뭐야?", dept="RETAIL", as_of=date(2024, 1, 1), entity_types=(EntityType.LAW,)
+    )
+
+    assert "review:art47" not in {d.entity.id for d in docs}
+
+
+def test_lexical_channel_surfaces_document_vector_search_would_miss():
+    """정형 용어 정확 일치는 BM25의 몫이다 -- 벡터는 질의와 무관한 텍스트로
+    임베딩해 두어, 어휘 채널이 없으면 절대 안 걸리는 상황을 만든다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    entity = Entity("law:1", EntityType.LAW, "이해상충 방지", "이해상충 방지체계에 관한 조항")
+    graph_store.add_entity(entity)
+    vector_store.upsert([VectorRecord(entity.id, EMB.embed_one("완전히 무관한 다른 주제"), entity.body)])
+
+    lexical_index = LexicalIndex()
+    lexical_index.index(entity.id, f"{entity.title}\n{entity.body}")
+    hr = HybridRetriever(EMB, vector_store, graph_store, lexical_index=lexical_index)
+
+    docs = hr.retrieve("이해상충", dept="RETAIL", as_of=date(2024, 1, 1), top_k=3)
+
+    matched = next((d for d in docs if d.entity.id == "law:1"), None)
+    assert matched is not None
+    assert matched.reason == "lexical_match"
+
+
+def test_lexical_hits_still_pass_rbac():
+    """어휘 검색도 다른 경로와 동일하게 RBAC를 통과해야 한다 -- 새 채널이
+    권한 우회로가 되면 안 된다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    entity = Entity("review:1", EntityType.REVIEW, "이해상충 IB 검토서", "IB 한정 내용", allowed_depts=("IB",))
+    graph_store.add_entity(entity)
+    vector_store.upsert([VectorRecord(entity.id, EMB.embed_one("무관"), entity.body, allowed_depts=("IB",))])
+
+    lexical_index = LexicalIndex()
+    lexical_index.index(entity.id, f"{entity.title}\n{entity.body}")
+    hr = HybridRetriever(EMB, vector_store, graph_store, lexical_index=lexical_index)
+
+    retail_docs = hr.retrieve("이해상충", dept="RETAIL", as_of=date(2024, 1, 1))
+    ib_docs = hr.retrieve("이해상충", dept="IB", as_of=date(2024, 1, 1))
+
+    assert "review:1" not in {d.entity.id for d in retail_docs}
+    assert "review:1" in {d.entity.id for d in ib_docs}
+
+
+class _SpyReranker(Reranker):
+    """리랭커가 실제로 후보 풀을 받아 순서를 결정하는지 확인하기 위해,
+    입력 순서를 뒤집어 돌려준다."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, list[str], int]] = []
+
+    def rerank(self, query, documents, top_n):
+        self.calls.append((query, list(documents), top_n))
+        indices = list(range(len(documents)))[::-1][:top_n]
+        return [RerankedItem(idx, float(len(indices) - rank)) for rank, idx in enumerate(indices)]
+
+
+def test_reranker_decides_final_order_of_recall_candidates():
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    for i in (1, 2):
+        entity = Entity(f"law:{i}", EntityType.LAW, f"업무위탁 조항 {i}", f"업무위탁 본문 {i}")
+        graph_store.add_entity(entity)
+        vector_store.upsert([VectorRecord(entity.id, EMB.embed_one(entity.title + entity.body), entity.body)])
+
+    spy = _SpyReranker()
+    hr = HybridRetriever(EMB, vector_store, graph_store, reranker=spy)
+    baseline = HybridRetriever(EMB, vector_store, graph_store)
+
+    reranked_ids = [d.entity.id for d in hr.retrieve("업무위탁", dept="RETAIL", as_of=date(2024, 1, 1), top_k=2)]
+    baseline_ids = [d.entity.id for d in baseline.retrieve("업무위탁", dept="RETAIL", as_of=date(2024, 1, 1), top_k=2)]
+
+    assert spy.calls, "리랭커가 호출되지 않았다"
+    assert reranked_ids == baseline_ids[::-1]
+
+
+def test_reranker_receives_title_and_body_of_candidates():
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    entity = Entity("law:1", EntityType.LAW, "업무위탁 조항", "업무위탁 본문")
+    graph_store.add_entity(entity)
+    vector_store.upsert([VectorRecord(entity.id, EMB.embed_one(entity.title + entity.body), entity.body)])
+
+    spy = _SpyReranker()
+    HybridRetriever(EMB, vector_store, graph_store, reranker=spy).retrieve(
+        "업무위탁", dept="RETAIL", as_of=date(2024, 1, 1)
+    )
+
+    _query, documents, _top_n = spy.calls[0]
+    assert documents == ["업무위탁 조항\n업무위탁 본문"]
+
+
+def test_citation_match_is_never_dropped_by_the_reranker():
+    """사용자가 조문 번호를 특정해 물었으면 그 조문은 리랭커가 어떤 점수를
+    주든 답변 근거에 남아야 한다 -- 리랭킹 대상 풀에서 아예 제외된다."""
+
+    class DropEverythingReranker(Reranker):
+        def rerank(self, query, documents, top_n):
+            return []
+
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    entity = Entity("law:art47", EntityType.LAW, "금융지주회사법 제47조(업무위탁)", "본문")
+    graph_store.add_entity(entity)
+    vector_store.upsert([VectorRecord(entity.id, EMB.embed_one("무관한 텍스트"), entity.body)])
+
+    hr = HybridRetriever(EMB, vector_store, graph_store, reranker=DropEverythingReranker())
+
+    docs = hr.retrieve("제47조가 뭐야?", dept="RETAIL", as_of=date(2024, 1, 1))
+
+    assert [d.entity.id for d in docs] == ["law:art47"]
+    assert docs[0].reason == "citation_match"

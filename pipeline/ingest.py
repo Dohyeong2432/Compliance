@@ -15,6 +15,7 @@ from typing import Any
 
 from knowledge.embedder import Embedder, Vector
 from knowledge.graph_store import GraphStore
+from knowledge.lexical import LexicalIndex
 from knowledge.vector_store import VectorRecord, VectorStore
 from ontology.schema import Entity, EntityType, Relation
 from pipeline.citation_extraction import extract_citation_relations
@@ -56,10 +57,15 @@ class IngestPipeline:
         vector_store: VectorStore,
         graph_store: GraphStore,
         embed_cache_path: str | Path | None = None,
+        lexical_index: LexicalIndex | None = None,
     ):
         self.embedder = embedder
         self.vector_store = vector_store
         self.graph_store = graph_store
+        # BM25 색인은 메모리 상주라 프로세스 재시작 시 비어 있지만, sync가 매
+        # 사이클 모든 문서를 다시 ingest하므로(임베딩만 캐시로 건너뛸 뿐
+        # 색인/upsert는 매번 수행) 시작 시 자동으로 다시 채워진다.
+        self.lexical_index = lexical_index
         self.embed_cache_path = Path(embed_cache_path) if embed_cache_path else None
         self._embed_cache: dict[str, dict[str, Any]] = self._load_embed_cache()
         # 캐시 히트 판정에 이 값을 텍스트와 함께 해시해 넣는다 -- GEMINI_EMBED_MODEL을
@@ -137,6 +143,8 @@ class IngestPipeline:
 
         for entity in entities:
             self.graph_store.add_entity(entity)
+            if self.lexical_index is not None:
+                self.lexical_index.index(entity.id, f"{entity.title}\n{entity.body}")
 
         for doc, entity in zip(documents, entities):
             for relation_type, target_id in doc.relations:

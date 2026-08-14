@@ -174,3 +174,24 @@ def test_state_persists_across_syncer_instances(tmp_path):
     report = syncer2.sync_once()
 
     assert report.results[0].removed == 1  # restart still remembered "2" existed before
+
+
+def test_removed_document_is_dropped_from_the_lexical_index_too():
+    """소스에서 사라진 문서는 그래프/벡터뿐 아니라 어휘 색인에서도 지워져야
+    한다 -- 한 곳이라도 남으면 삭제된 문서가 계속 검색된다."""
+    from knowledge.lexical import LexicalIndex
+
+    lexical_index = LexicalIndex()
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store, lexical_index=lexical_index)
+    connector = FakeConnector([_law_doc("1", title="업무위탁 조항"), _law_doc("2", title="겸직 조항")])
+    syncer = IngestSyncer(pipeline, graph_store, vector_store, {"law": connector})
+
+    syncer.sync_once()
+    assert [m.entity_id for m in lexical_index.search("겸직")] == ["law:2"]
+
+    connector.documents = [_law_doc("1", title="업무위탁 조항")]  # "2"가 소스에서 사라짐
+    syncer.sync_once()
+
+    assert lexical_index.search("겸직") == []

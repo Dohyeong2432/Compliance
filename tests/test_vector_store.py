@@ -98,3 +98,27 @@ def test_upsert_overwrites_existing_record(vector_store):
     q = EMB.embed_one("두번째 버전 텍스트")
     results = vector_store.search(q, top_k=5, dept="RETAIL")
     assert "doc1" in {m.entity_id for m in results}
+
+
+def test_entity_types_filter_restricts_search_to_requested_sources(vector_store):
+    """소스 타입은 entity_id 접두사에서 복원하므로 레코드 스키마 변경이나
+    기존 색인 마이그레이션 없이 필터가 동작해야 한다."""
+    q = EMB.embed_one("업무위탁 관련 문서")
+    vector_store.upsert([VectorRecord("law:1", EMB.embed_one("업무위탁 관련 문서"), "text")])
+    vector_store.upsert([VectorRecord("review:1", EMB.embed_one("업무위탁 관련 문서"), "text")])
+
+    from ontology.schema import EntityType
+
+    results = vector_store.search(q, top_k=5, dept="ANY", entity_types=(EntityType.LAW,))
+
+    assert {m.entity_id for m in results} == {"law:1"}
+
+
+def test_entity_types_none_searches_every_source(vector_store):
+    q = EMB.embed_one("업무위탁 관련 문서")
+    vector_store.upsert([VectorRecord("law:1", EMB.embed_one("업무위탁 관련 문서"), "text")])
+    vector_store.upsert([VectorRecord("review:1", EMB.embed_one("업무위탁 관련 문서"), "text")])
+
+    results = vector_store.search(q, top_k=5, dept="ANY", entity_types=None)
+
+    assert {m.entity_id for m in results} == {"law:1", "review:1"}
