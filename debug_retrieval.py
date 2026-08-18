@@ -21,6 +21,19 @@ DEPT = sys.argv[2] if len(sys.argv) > 2 else "compliance"
 TOP_K = 30  # 실제 /chat 기본값(6)보다 훨씬 넉넉하게 -- 6등 밖에서 뭐가 있었는지 보려고
 
 components = build_components()
+
+# VECTOR_STORE_BACKEND=memory / GRAPH_STORE_BACKEND=memory(기본값)에서는
+# build_components()가 만드는 저장소가 이 프로세스 메모리 안에서만 존재한다.
+# 이미 떠 있는 uvicorn 서버 프로세스와는 메모리를 전혀 공유하지 않으므로,
+# api/main.py의 lifespan()이 기동 시 하는 것과 동일하게 여기서도 한 번
+# sync_once()를 직접 돌려 문서를 채워야 한다 -- 이걸 빠뜨리면 완전히 빈
+# 저장소를 대상으로 검색해 항상 0건이 나온다.
+print("색인 동기화 중 (law.go.kr 크롤링 포함, 시간이 걸릴 수 있습니다)...")
+report = components.syncer.sync_once()
+for r in report.results:
+    print(f"  [{r.name}] ingested={r.ingested} removed={r.removed} errors={r.errors}")
+print()
+
 results = components.retriever.retrieve(QUERY, dept=DEPT, top_k=TOP_K)
 
 print(f"질의: {QUERY!r}  (dept={DEPT}, top_k={TOP_K})")
