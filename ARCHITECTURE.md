@@ -217,14 +217,29 @@ RBAC/시점 판정은 하지 않고 `(entity_id, score)`만 돌려줍니다 — 
 - `review_contract(text, agent)`가 조항마다
   `agent.ask(CLAUSE_REVIEW_PROMPT_TEMPLATE.format(...))`를 순차 호출해
   `ClauseReview`(라벨/원문/`AgentTurnResult`) 목록을 만든다.
+- **조항 유형별 체크리스트** (`agent/contract_checklist.py`): "문제 있는지
+  검토하세요"라는 자유형식 지시만으로는 조항마다 검토 깊이가 들쭉날쭉해진다.
+  `checklist_for_label(label)`이 조항 라벨의 괄호 제목(예: "제15조(손해배상)"의
+  "손해배상")을 키워드로 매칭해 손해배상/해지/관할/비밀유지/면책/업무위탁 등
+  유형별 체크리스트(민법 제398조, 약관법 제14조, 금융지주회사법 제47조 등
+  관련 법리 포함)를 골라 프롬프트에 삽입한다. 매칭 안 되는 유형과
+  "전체 본문" 폴백은 범용 체크리스트로 떨어진다. `CLAUSE_REVIEW_PROMPT_TEMPLATE`도
+  "위험도/문제 조항/근거/수정 제안" 4개 필드를 강제해 답변을 구조화한다.
+- **도구 호출 한도**: 계약 조항은 여러 법령이 얽혀 근거 조사가 한 번의
+  왕복으로 안 끝날 수 있다. `agent/contract_review.py`의
+  `CONTRACT_REVIEW_MAX_TOOL_ITERATIONS = 8`을 `/contract-review`에서만 쓰고
+  (`api/main.py`의 `_build_agent(..., max_tool_iterations=...)`),
+  `/chat`은 기존 `agent.harness.MAX_TOOL_ITERATIONS`(4) 그대로 둔다 — 짧은
+  채팅 질문에까지 한도를 늘리면 지연·비용만 커진다.
 - `build_review_document(...)`가 `python-docx`로 검토의견서를 조립한다. 원본
   워드파일에 코멘트를 삽입하는 대신 별도 문서를 새로 생성하는 방식을
   택했다 — python-docx의 네이티브 코멘트 API는 저수준 OOXML 조작이 필요해
-  원본 문서 구조를 깨뜨릴 위험이 있다.
+  원본 문서 구조를 깨뜨릴 위험이 있다. 구조화 필드(위험도/문제 조항/근거/
+  수정 제안) 라벨은 볼드 처리해 훑어보기 쉽게 한다.
 - `POST /contract-review`(`api/main.py`)는 업로드 파일을 임시파일로 저장 후
   기존 `_extract_text()`(pandoc/catdoc/pdftotext)로 텍스트화하고, 검토 완료 후
   `.docx` 바이너리를 응답으로 돌려준다. **동기 처리**다 — 조항 수만큼
-  `agent.ask()`가 순차로 도므로(조항당 최대 4회 도구 호출), 조항이 많은
+  `agent.ask()`가 순차로 도므로(조항당 최대 8회 도구 호출), 조항이 많은
   계약서는 응답까지 수 분 걸릴 수 있다. Job 큐는 의도적으로 만들지 않았다;
   타임아웃이 실제로 문제가 되면 이후 비동기 방식으로 전환 검토.
 

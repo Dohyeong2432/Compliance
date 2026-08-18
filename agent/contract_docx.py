@@ -17,19 +17,33 @@ from agent.sso import SessionContext
 
 _REFERENCE_LIST_MARKER = "**참고 문서**"
 
+# agent.contract_review.CLAUSE_REVIEW_PROMPT_TEMPLATE이 요구하는 구조화 필드
+# 라벨. 이 줄들만 라벨 부분을 볼드 처리해 검토의견서에서 한눈에 훑어볼 수
+# 있게 한다 -- 체크리스트 도입으로 답변이 길어진 만큼, 문서에서도 구조가
+# 보여야 실제로 "세밀해진" 효과가 있다.
+_FIELD_LABELS = ("위험도:", "문제 조항:", "근거:", "수정 제안:")
+
 
 def _add_answer_paragraphs(document: Document, answer: str) -> None:
     """agent.ask()가 돌려주는 answer는 이미 CitationGuard.apply()가
     [[CITE:id]]를 각주 번호로, 하단에 "**참고 문서**" 목록으로 정리해준
     텍스트다. 별도 마크다운 파서 없이 줄 단위로 문단화하되, 참고 문서 제목
-    줄만 볼드 처리한다."""
+    줄과 구조화 필드 라벨(위험도/문제 조항/근거/수정 제안)만 볼드 처리한다."""
     for line in answer.splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
             continue
-        if line.strip() == _REFERENCE_LIST_MARKER:
+        if stripped == _REFERENCE_LIST_MARKER:
             document.add_paragraph().add_run("참고 문서").bold = True
-        elif line.strip() == "---":
             continue
+        if stripped == "---":
+            continue
+
+        label = next((field_label for field_label in _FIELD_LABELS if stripped.startswith(field_label)), None)
+        if label is not None:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(label).bold = True
+            paragraph.add_run(stripped[len(label):])
         else:
             document.add_paragraph(line)
 

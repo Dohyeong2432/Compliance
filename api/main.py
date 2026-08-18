@@ -30,8 +30,8 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from agent.contract_docx import build_review_document
-from agent.contract_review import review_contract
-from agent.harness import ComplianceAgent
+from agent.contract_review import CONTRACT_REVIEW_MAX_TOOL_ITERATIONS, review_contract
+from agent.harness import MAX_TOOL_ITERATIONS, ComplianceAgent
 from agent.llm_client import AnthropicLLMClient, GeminiLLMClient, LLMClient
 from agent.sso import SessionContext, SSOAuthError, SSOConfigError, build_session_context
 from bootstrap import AppComponents, build_components
@@ -135,8 +135,15 @@ def _authenticate(authorization: str | None, components: AppComponents) -> Sessi
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
 
-def _build_agent(session: SessionContext, components: AppComponents) -> ComplianceAgent:
-    """/chat과 /contract-review이 공유하는 요청별 ComplianceAgent 생성."""
+def _build_agent(
+    session: SessionContext, components: AppComponents, max_tool_iterations: int = MAX_TOOL_ITERATIONS
+) -> ComplianceAgent:
+    """/chat과 /contract-review이 공유하는 요청별 ComplianceAgent 생성.
+
+    max_tool_iterations는 /chat에서는 기본값(agent.harness.MAX_TOOL_ITERATIONS)을
+    그대로 쓰고, /contract-review에서만 더 높은 값을 넘긴다 -- 계약 조항은
+    여러 법령이 얽혀 근거 조사가 한 번의 왕복으로 안 끝나는 경우가 있는
+    반면, 짧은 채팅 질문에까지 한도를 늘리면 불필요하게 지연·비용만 커진다."""
     try:
         llm_client = _get_llm_client()
     except Exception as exc:  # optional dependency / missing API key
@@ -149,6 +156,7 @@ def _build_agent(session: SessionContext, components: AppComponents) -> Complian
         graph_store=components.graph_store,
         session=session,
         audit_logger=components.audit_logger,
+        max_tool_iterations=max_tool_iterations,
     )
 
 
@@ -196,7 +204,7 @@ async def contract_review(
         except UnparsableDocumentError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    agent = _build_agent(session, components)
+    agent = _build_agent(session, components, max_tool_iterations=CONTRACT_REVIEW_MAX_TOOL_ITERATIONS)
     clause_reviews = review_contract(text, agent)
     document = build_review_document(file.filename or "계약서", session, clause_reviews)
 

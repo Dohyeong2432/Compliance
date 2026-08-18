@@ -71,6 +71,26 @@ def test_build_review_document_formats_citation_reference_list():
     assert "---" not in texts  # 구분선은 문서 문단으로 남기지 않음
 
 
+def test_build_review_document_bolds_structured_field_labels():
+    """CLAUSE_REVIEW_PROMPT_TEMPLATE이 요구하는 위험도/문제 조항/근거/수정
+    제안 필드는 라벨 부분만 볼드, 나머지는 일반 텍스트여야 훑어보기 쉽다."""
+    session = SessionContext(user_id="u1", dept="RETAIL")
+    answer = "위험도: 상\n문제 조항: 배상 상한이 없음\n근거: 민법 제398조\n수정 제안: 배상 상한 설정"
+    reviews = [ClauseReview("제1조(손해배상)", "원문", AgentTurnResult(answer=answer))]
+
+    document = build_review_document("계약서.docx", session, reviews)
+
+    field_paragraphs = {
+        p.text: p for p in document.paragraphs if p.text.startswith(("위험도:", "문제 조항:", "근거:", "수정 제안:"))
+    }
+    assert len(field_paragraphs) == 4
+    for text, paragraph in field_paragraphs.items():
+        label = text.split(":", 1)[0] + ":"
+        assert paragraph.runs[0].text == label
+        assert paragraph.runs[0].bold is True
+        assert paragraph.runs[1].bold is not True
+
+
 def test_build_review_document_round_trips_through_docx_bytes():
     """실제 .docx 바이트로 저장 후 다시 읽어도 내용이 보존되는지 -- API
     엔드포인트가 정확히 이 왕복(save to BytesIO -> Response)을 한다."""
