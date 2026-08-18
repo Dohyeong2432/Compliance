@@ -1,3 +1,4 @@
+import io
 import shutil
 import subprocess
 import time
@@ -206,3 +207,92 @@ def test_admin_resync_picks_up_file_added_after_startup(api_env, monkeypatch, tm
     regulation_result = next(r for r in body["results"] if r["source"] == "regulation")
     assert regulation_result["ingested"] == 1
     assert main_module.app.state.components.graph_store.has_entity("regulation:1") is True
+
+
+# ---------------------------------------------------------------------------
+# /contract-review
+# ---------------------------------------------------------------------------
+
+
+def test_contract_review_fails_closed_without_sso_config(api_env):
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        response = client.post("/contract-review", files={"file": ("계약서.docx", b"dummy", "application/octet-stream")})
+    assert response.status_code == 501
+
+
+def test_contract_review_rejects_missing_authorization_header(api_env, monkeypatch):
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        response = client.post("/contract-review", files={"file": ("계약서.docx", b"dummy", "application/octet-stream")})
+    assert response.status_code == 401
+
+
+def test_contract_review_rejects_unsupported_file_extension(api_env, monkeypatch):
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        response = client.post(
+            "/contract-review",
+            files={"file": ("계약서.txt", b"dummy", "text/plain")},
+            headers={"Authorization": f"Bearer {_make_token()}"},
+        )
+    assert response.status_code == 400
+
+
+def test_contract_review_happy_path_returns_docx(api_env, monkeypatch, tmp_path, require_pandoc):
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+
+    from agent.llm_client import LLMResponse, ScriptedLLMClient
+
+    md = tmp_path / "contract.md"
+    md.write_text("제1조(목적) 이 계약은 위수탁 업무 범위를 정한다.", encoding="utf-8")
+    contract_docx = tmp_path / "계약서.docx"
+    subprocess.run(["pandoc", str(md), "-o", str(contract_docx)], check=True)
+
+    with TestClient(main_module.app) as client:
+        script = [LLMResponse(text="법규 위반 소지가 없습니다.", tool_call=None, raw=[{"type": "text", "text": "..."}])]
+        main_module.app.state.llm_client = ScriptedLLMClient(script)
+
+        with open(contract_docx, "rb") as f:
+            response = client.post(
+                "/contract-review",
+                files={
+                    "file": (
+                        "계약서.docx",
+                        f.read(),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+                headers={"Authorization": f"Bearer {_make_token()}"},
+            )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+
+    from docx import Document
+
+    document = Document(io.BytesIO(response.content))
+    texts = [p.text for p in document.paragraphs]
+    assert any("제1조" in t for t in texts)
+    assert "법규 위반 소지가 없습니다." in texts

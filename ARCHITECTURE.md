@@ -201,6 +201,33 @@ RBAC/시점 판정은 하지 않고 `(entity_id, score)`만 돌려줍니다 — 
 - `AuditLogger`: 모든 턴을 JSONL로 append-only 기록(요청자 dept, 검색된 id,
   검증/거부된 인용, 최종 답변).
 
+### `agent/contract_review.py` / `agent/contract_docx.py` — 계약서 검토 (`POST /contract-review`)
+`/chat`이 "짧은 질문 → 답변" 패턴인 것과 달리, 계약서 초안은 조항마다 개별
+검토가 필요한 문서다. 계약서는 지식 그래프에 색인할 대상(`ontology.EntityType`)이
+아니라 그때그때 검토하고 버리는 일회성 입력이므로, RAG 색인 파이프라인과는
+별도의 요청-응답 경로로 만들었다. 새 LLM 오케스트레이션은 만들지 않고, 조항마다
+기존 `ComplianceAgent.ask()`를 그대로 호출한다 — 도구 호출 루프, RBAC,
+인용 검증, 감사 로그가 전부 조항 단위로 자동 재사용된다.
+
+- `pipeline/korean_article_parser.py`의 `split_into_articles()`(원래
+  `LocalFileRegulationConnector` 전용 "제N조(제목)" 파서, `pipeline/connectors/local_file.py`가
+  재-export)를 계약서 조항 분리에도 그대로 재사용한다. 조문 헤딩이 없는
+  계약서(영문 계약, 단순 번호 목록 등)는 전체 본문을 단일 "전체 본문" 조항으로
+  취급해 통째로 검토한다 — 사규 파서와 동일한 폴백.
+- `review_contract(text, agent)`가 조항마다
+  `agent.ask(CLAUSE_REVIEW_PROMPT_TEMPLATE.format(...))`를 순차 호출해
+  `ClauseReview`(라벨/원문/`AgentTurnResult`) 목록을 만든다.
+- `build_review_document(...)`가 `python-docx`로 검토의견서를 조립한다. 원본
+  워드파일에 코멘트를 삽입하는 대신 별도 문서를 새로 생성하는 방식을
+  택했다 — python-docx의 네이티브 코멘트 API는 저수준 OOXML 조작이 필요해
+  원본 문서 구조를 깨뜨릴 위험이 있다.
+- `POST /contract-review`(`api/main.py`)는 업로드 파일을 임시파일로 저장 후
+  기존 `_extract_text()`(pandoc/catdoc/pdftotext)로 텍스트화하고, 검토 완료 후
+  `.docx` 바이너리를 응답으로 돌려준다. **동기 처리**다 — 조항 수만큼
+  `agent.ask()`가 순차로 도므로(조항당 최대 4회 도구 호출), 조항이 많은
+  계약서는 응답까지 수 분 걸릴 수 있다. Job 큐는 의도적으로 만들지 않았다;
+  타임아웃이 실제로 문제가 되면 이후 비동기 방식으로 전환 검토.
+
 ### `pipeline/`
 6개 커넥터(`pipeline/connectors/*`) 중 REGULATION/REVIEW/FAQ는 로컬 파일
 스테이징으로, LAW/INTERPRETATION/CASE는 주입된 크롤러 콜백으로 실제 동작합니다

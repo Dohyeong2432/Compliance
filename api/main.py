@@ -17,18 +17,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import os
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from agent.contract_docx import build_review_document
+from agent.contract_review import review_contract
 from agent.harness import ComplianceAgent
 from agent.llm_client import AnthropicLLMClient, GeminiLLMClient, LLMClient
-from agent.sso import SSOAuthError, SSOConfigError, build_session_context
+from agent.sso import SessionContext, SSOAuthError, SSOConfigError, build_session_context
 from bootstrap import AppComponents, build_components
+from pipeline.connectors.local_file import _SUPPORTED_SUFFIXES, UnparsableDocumentError, _extract_text
 
 logger = logging.getLogger("compliance_agent")
 
@@ -114,39 +121,98 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return authorization.split(" ", 1)[1].strip()
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest, authorization: str | None = Header(default=None)) -> ChatResponse:
-    components: AppComponents = app.state.components
-
+def _authenticate(authorization: str | None, components: AppComponents) -> SessionContext:
+    """/chat, /admin/resync, /contract-review이 공유하는 fail-closed SSO 게이트."""
     if components.sso_config is None:
         raise HTTPException(status_code=501, detail="SSO is not configured on this server")
 
     token = _extract_bearer_token(authorization)
     try:
-        session = build_session_context(token, components.sso_config)
+        return build_session_context(token, components.sso_config)
     except SSOAuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except SSOConfigError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
+
+def _build_agent(session: SessionContext, components: AppComponents) -> ComplianceAgent:
+    """/chat과 /contract-review이 공유하는 요청별 ComplianceAgent 생성."""
     try:
         llm_client = _get_llm_client()
     except Exception as exc:  # optional dependency / missing API key
         logger.exception("Failed to construct LLM client")
         raise HTTPException(status_code=500, detail="LLM backend unavailable") from exc
 
-    agent = ComplianceAgent(
+    return ComplianceAgent(
         llm_client=llm_client,
         retriever=components.retriever,
         graph_store=components.graph_store,
         session=session,
         audit_logger=components.audit_logger,
     )
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest, authorization: str | None = Header(default=None)) -> ChatResponse:
+    components: AppComponents = app.state.components
+    session = _authenticate(authorization, components)
+    agent = _build_agent(session, components)
+
     result = agent.ask(request.message)
     return ChatResponse(
         answer=result.answer,
         verified_citations=result.verified_citations,
         rejected_citations=result.rejected_citations,
+    )
+
+
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@app.post("/contract-review")
+async def contract_review(
+    file: UploadFile = File(...), authorization: str | None = Header(default=None)
+) -> Response:
+    """계약서 초안(.docx/.doc/.pdf)을 업로드받아 조항 단위로 검토한 뒤 검토의견서
+    .docx를 돌려준다. /chat과 달리 여러 차례(조항 수만큼)의 agent.ask() 호출이
+    순차로 필요해 응답까지 시간이 걸릴 수 있다 -- 동기 처리이며 별도 job 큐는 없다."""
+    components: AppComponents = app.state.components
+    session = _authenticate(authorization, components)
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in _SUPPORTED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 파일 형식입니다: {suffix or '(없음)'} "
+            f"(지원 형식: {', '.join(_SUPPORTED_SUFFIXES)})",
+        )
+
+    content = await file.read()
+    with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp.flush()
+        try:
+            text = _extract_text(Path(tmp.name))
+        except UnparsableDocumentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    agent = _build_agent(session, components)
+    clause_reviews = review_contract(text, agent)
+    document = build_review_document(file.filename or "계약서", session, clause_reviews)
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    download_name = f"검토의견서_{Path(file.filename or 'contract').stem}.docx"
+    return Response(
+        content=buffer.getvalue(),
+        media_type=DOCX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"contract_review.docx\"; "
+                f"filename*=UTF-8''{quote(download_name)}"
+            )
+        },
     )
 
 
@@ -157,17 +223,7 @@ def resync(authorization: str | None = Header(default=None)) -> dict:
     Same fail-closed SSO gate as /chat (any authenticated session, no
     additional role check yet -- see AGENT/README notes on remaining work)."""
     components: AppComponents = app.state.components
-
-    if components.sso_config is None:
-        raise HTTPException(status_code=501, detail="SSO is not configured on this server")
-
-    token = _extract_bearer_token(authorization)
-    try:
-        build_session_context(token, components.sso_config)
-    except SSOAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except SSOConfigError as exc:
-        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    _authenticate(authorization, components)
 
     report = components.syncer.sync_once()
     return {

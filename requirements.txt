@@ -7,6 +7,11 @@ uvicorn>=0.52
 pydantic>=2
 python-dotenv>=1.0
 
+# /contract-review 엔드포인트: 계약서 파일 업로드(UploadFile, python-multipart 없이는
+# FastAPI가 multipart/form-data를 못 읽음) + 검토의견서 .docx 생성(python-docx).
+python-multipart>=0.0.9
+python-docx>=1.1
+
 # Persistent knowledge backends (Phase 1). Falls back to in-memory stores
 # when unset via VECTOR_STORE_BACKEND=memory / GRAPH_STORE_BACKEND=memory.
 kuzu>=0.11

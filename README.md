@@ -158,6 +158,25 @@ connector = LawConnector(fetch_items=crawl_law_items)
 curl -X POST http://localhost:8000/admin/resync -H "Authorization: Bearer <SSO JWT>"
 ```
 
+## 계약서 조항별 검토 (`POST /contract-review`)
+
+`/chat`이 짧은 질문 하나에 답하는 것과 달리, `/contract-review`는 계약서 초안
+(.docx/.doc/.pdf)을 업로드받아 조항("제N조(제목)") 단위로 관련 법령/사규를
+검색해 검토하고, 결과를 검토의견서 `.docx`로 돌려줍니다. 계약서 자체는 지식
+그래프에 색인되지 않는 일회성 입력입니다.
+
+```bash
+curl -X POST http://localhost:8000/contract-review \
+  -H "Authorization: Bearer <SSO JWT>" \
+  -F "file=@계약서초안.docx" \
+  -o 검토의견서.docx
+```
+
+**동기 처리**입니다 — 조항 수만큼 순차로 검토가 진행되므로(조항당 최대 4회
+도구 호출), 조항이 많은 계약서는 응답까지 수 분 걸릴 수 있습니다. 별도 job
+큐는 없습니다. 조문 헤딩("제N조(제목)")이 없는 계약서는 전체 본문을 한
+건으로 취급해 검토합니다.
+
 ## Windows PowerShell에서 테스트할 때 한글이 깨지는 문제
 
 `curl` 대신 Windows PowerShell의 `Invoke-RestMethod`로 `/chat`을 테스트하면 한글이
