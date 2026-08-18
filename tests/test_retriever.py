@@ -353,3 +353,65 @@ def test_citation_match_is_never_dropped_by_the_reranker():
 
     assert [d.entity.id for d in docs] == ["law:art47"]
     assert docs[0].reason == "citation_match"
+
+
+# ---------------------------------------------------------------------------
+# 회수(recall) 폭 -- 채널 내 순위가 top_k보다 낮은 문서도 융합 후보에 들도록
+# top_k 자체가 아니라 top_k * 5를 각 채널 회수 폭으로 써야 한다.
+# ---------------------------------------------------------------------------
+
+
+class _SpyLexicalIndex(LexicalIndex):
+    """실제 검색은 그대로 위임하되, 호출받은 top_k 인자를 기록한다."""
+
+    def __init__(self):
+        super().__init__()
+        self.called_top_k: list[int] = []
+
+    def search(self, query, top_k=10, entity_types=None):
+        self.called_top_k.append(top_k)
+        return super().search(query, top_k=top_k, entity_types=entity_types)
+
+
+class _SpyVectorStore(InMemoryVectorStore):
+    def __init__(self):
+        super().__init__()
+        self.called_top_k: list[int] = []
+
+    def search(self, query_vector, top_k=10, dept=None, as_of=None, entity_types=None):
+        self.called_top_k.append(top_k)
+        return super().search(query_vector, top_k=top_k, dept=dept, as_of=as_of, entity_types=entity_types)
+
+
+def test_recall_width_is_wider_than_final_top_k():
+    """top_k=6으로 검색해도 각 채널(BM25/벡터)에는 top_k*5=30을 요청해야
+    한다 -- 그래야 채널 안에서 6등 밖인 문서도 융합 후보 풀에는 남아,
+    RRF로 합산했을 때 최종 상위권으로 올라올 기회를 가진다. 실사용에서
+    이 폭이 top_k와 동일했을 때, 법령이 채널 내 순위가 낮다는 이유만으로
+    (다른 소스와 경쟁해 지기도 전에) 후보 풀에서 원천 배제되는 문제가
+    확인됐다."""
+    graph_store = NetworkXGraphStore()
+    lexical_spy = _SpyLexicalIndex()
+    vector_spy = _SpyVectorStore()
+    entity = Entity("law:1", EntityType.LAW, "테스트 법령", "테스트 본문")
+    graph_store.add_entity(entity)
+    lexical_spy.index(entity.id, entity.title + "\n" + entity.body)
+    vector_spy.upsert([VectorRecord(entity.id, EMB.embed_one(entity.title + entity.body), entity.body)])
+
+    hr = HybridRetriever(EMB, vector_spy, graph_store, lexical_index=lexical_spy)
+    hr.retrieve("테스트", dept="RETAIL", as_of=date(2024, 1, 1), top_k=6)
+
+    assert lexical_spy.called_top_k == [30]
+    assert vector_spy.called_top_k == [30]
+
+
+def test_recall_width_scales_with_requested_top_k():
+    graph_store = NetworkXGraphStore()
+    lexical_spy = _SpyLexicalIndex()
+    vector_spy = _SpyVectorStore()
+
+    hr = HybridRetriever(EMB, vector_spy, graph_store, lexical_index=lexical_spy)
+    hr.retrieve("테스트", dept="RETAIL", as_of=date(2024, 1, 1), top_k=2)
+
+    assert lexical_spy.called_top_k == [10]
+    assert vector_spy.called_top_k == [10]

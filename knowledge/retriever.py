@@ -58,6 +58,14 @@ _ARTICLE_CITATION = re.compile(r"제\s*(\d+)\s*조(?:\s*의\s*(\d+))?")
 # 않으면서 하위권 기여를 완만하게 줄인다.
 _RRF_K = 60
 
+# 회수(recall) 폭은 최종 반환 개수(top_k)보다 넉넉하게 잡는다. "채널 안에서
+# top_k등 밖이면 융합 후보에도 못 낀다"는 문제가 실사용에서 확인됐다 --
+# 법령이 사규보다 채널 내 순위가 낮으면(예: BM25 8등) top_k=6 검색에서는
+# 애초에 후보 풀에 들지 못해, source_types를 좁혀도(법령만 남겨도) 회수
+# 단계 자체가 걸러버린 뒤라 아무 효과가 없었다. 회수는 넓게, 최종 노출만
+# top_k로 자르는 게 이 모듈 docstring이 원래 의도한 "20-30개 후보 풀"이다.
+_RECALL_WIDTH_MULTIPLIER = 5
+
 
 def _article_citation_needles(query: str) -> list[str]:
     needles: list[str] = []
@@ -185,7 +193,14 @@ class HybridRetriever:
         already_seen: set[str],
     ) -> list[RetrievedDocument]:
         """BM25와 벡터 검색 결과를 각 채널 내 순위 기반(RRF)으로 합쳐,
-        점수 스케일이 다른 두 채널을 공정하게 섞은 후보 목록을 만든다."""
+        점수 스케일이 다른 두 채널을 공정하게 섞은 후보 목록을 만든다.
+
+        각 채널에서 회수하는 폭은 top_k가 아니라 top_k * _RECALL_WIDTH_MULTIPLIER다
+        -- 최종 노출 개수와 회수 폭을 동일하게 쓰면, 한 채널 안에서 top_k등
+        밖인 문서는(예: 법령이 BM25 8등, top_k=6) 다른 채널에서 아무리 강해도
+        융합 후보에 들 기회조차 없다. 회수는 넓게 하고, 최종 top_k 컷은
+        retrieve()의 리랭킹 단계에서 한다."""
+        recall_k = top_k * _RECALL_WIDTH_MULTIPLIER
         fused_scores: dict[str, float] = {}
         candidates: dict[str, RetrievedDocument] = {}
 
@@ -200,13 +215,13 @@ class HybridRetriever:
 
         if self.lexical_index is not None:
             for rank, match in enumerate(
-                self.lexical_index.search(query, top_k=top_k, entity_types=entity_types), start=1
+                self.lexical_index.search(query, top_k=recall_k, entity_types=entity_types), start=1
             ):
                 absorb(match.entity_id, rank, "lexical_match")
 
         query_vector = self.embedder.embed_query(query)
         vector_matches = self.vector_store.search(
-            query_vector, top_k=top_k, dept=dept, as_of=as_of, entity_types=entity_types
+            query_vector, top_k=recall_k, dept=dept, as_of=as_of, entity_types=entity_types
         )
         for rank, match in enumerate(vector_matches, start=1):
             absorb(match.entity_id, rank, "vector_match")
