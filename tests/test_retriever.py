@@ -6,7 +6,7 @@ from knowledge.embedder import HashEmbedder
 from knowledge.graph_store import NetworkXGraphStore
 from knowledge.lexical import LexicalIndex
 from knowledge.reranker import RerankedItem, Reranker
-from knowledge.retriever import HybridRetriever
+from knowledge.retriever import HybridRetriever, RetrievedDocument
 from knowledge.vector_store import InMemoryVectorStore, VectorRecord
 from ontology.schema import Entity, EntityType, Relation, RelationType
 
@@ -415,3 +415,75 @@ def test_recall_width_scales_with_requested_top_k():
 
     assert lexical_spy.called_top_k == [10]
     assert vector_spy.called_top_k == [10]
+
+
+# ---------------------------------------------------------------------------
+# 소스별 최소 보장 -- 회수 폭을 넓혀도 최종 top_k 컷이 "전체 풀 상위 top_k"
+# 하나뿐이면, 문서 수가 많은 소스(예: 사규)가 순위 상위를 통째로 차지해
+# 문서 수가 적은 소스(예: 법령)를 완전히 밀어낼 수 있다. 소스별 상위
+# _MIN_PER_SOURCE_TYPE개를 flat top_k 컷과 합집합으로 더해 이를 방지한다.
+# ---------------------------------------------------------------------------
+
+
+def _pool_doc(entity_id: str, entity_type: EntityType) -> RetrievedDocument:
+    entity = Entity(entity_id, entity_type, entity_id, "본문")
+    return RetrievedDocument(entity, 0.0, "vector_match")
+
+
+def test_stratify_guarantees_min_five_per_source_type_even_when_ranked_low():
+    hr = HybridRetriever(EMB, InMemoryVectorStore(), NetworkXGraphStore())
+    # REGULATION 8건이 융합 순위 1~8등을 모두 차지하고, LAW 1건은 9등으로
+    # 밀려 있다 -- flat top_k=6 컷이라면 LAW는 완전히 잘려나간다.
+    pool = [_pool_doc(f"regulation:{i}", EntityType.REGULATION) for i in range(1, 9)]
+    pool.append(_pool_doc("law:1", EntityType.LAW))
+
+    selected = hr._stratify_by_source(pool, top_k=6, entity_types=None)
+
+    selected_ids = {doc.entity.id for doc in selected}
+    assert "law:1" in selected_ids
+    assert {f"regulation:{i}" for i in range(1, 7)} <= selected_ids
+
+
+def test_stratify_falls_back_to_flat_top_k_when_single_source_type_requested():
+    hr = HybridRetriever(EMB, InMemoryVectorStore(), NetworkXGraphStore())
+    pool = [_pool_doc(f"law:{i}", EntityType.LAW) for i in range(1, 9)]
+
+    selected = hr._stratify_by_source(pool, top_k=3, entity_types=(EntityType.LAW,))
+
+    assert [doc.entity.id for doc in selected] == ["law:1", "law:2", "law:3"]
+
+
+def test_stratify_does_not_duplicate_docs_already_in_flat_cut():
+    hr = HybridRetriever(EMB, InMemoryVectorStore(), NetworkXGraphStore())
+    pool = [_pool_doc(f"law:{i}", EntityType.LAW) for i in range(1, 4)]
+
+    selected = hr._stratify_by_source(pool, top_k=10, entity_types=None)
+
+    assert len(selected) == 3
+    assert [doc.entity.id for doc in selected] == ["law:1", "law:2", "law:3"]
+
+
+def test_retrieve_surfaces_minority_source_type_despite_dominant_source(monkeypatch):
+    """전체 통합 경로: 사규가 8건, 법령이 1건일 때 top_k=2로도 법령이
+    잘리지 않고, 리랭커가 소스별 최소 보장 이후의 합집합 전체를 받는지
+    확인한다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    for i in range(1, 9):
+        entity = Entity(f"regulation:{i}", EntityType.REGULATION, f"업무위탁 규정 {i}", "본문")
+        graph_store.add_entity(entity)
+        vector_store.upsert([VectorRecord(entity.id, EMB.embed_one(entity.title + entity.body), entity.body)])
+    law_entity = Entity("law:1", EntityType.LAW, "업무위탁 관련 법령", "부칙 및 기타 조항 다수")
+    graph_store.add_entity(law_entity)
+    vector_store.upsert(
+        [VectorRecord(law_entity.id, EMB.embed_one(law_entity.title + law_entity.body), law_entity.body)]
+    )
+
+    spy = _SpyReranker()
+    hr = HybridRetriever(EMB, vector_store, graph_store, reranker=spy)
+
+    docs = hr.retrieve("업무위탁", dept="RETAIL", as_of=date(2024, 1, 1), top_k=2)
+
+    assert "law:1" in {d.entity.id for d in docs}
+    _query, documents, top_n = spy.calls[0]
+    assert top_n == len(documents)

@@ -66,6 +66,17 @@ _RRF_K = 60
 # top_k로 자르는 게 이 모듈 docstring이 원래 의도한 "20-30개 후보 풀"이다.
 _RECALL_WIDTH_MULTIPLIER = 5
 
+# 회수 폭을 넓혀도 남는 문제 하나: 최종 top_k 컷은 여전히 "전체 풀에서
+# 상위 top_k개"라, 문서 수가 많거나 어휘 밀도가 높은 소스(예: 사규 -- 조문
+# 단위로 세밀하게 쪼개져 있어 법령보다 개체 수가 훨씬 많음)가 융합 순위
+# 상위를 통째로 차지해버리면, 문서 수가 적은 소스(예: 법령)가 실제로는
+# 관련성이 충분히 높아도(채널 융합 기준 7등 정도) top_k=6 안에 자리를
+# 못 얻고 완전히 잘려나간다 -- 실사용 감사로그로 여러 차례 재현 확인됨.
+# 그래서 최종 선정은 "전체 풀 상위 top_k" 하나가 아니라, 여기에 "소스
+# (entity_type)별 상위 _MIN_PER_SOURCE_TYPE개"를 더해 합집합으로 만든다:
+# 사규가 아무리 많아도 법령을 완전히 밀어내지 못한다는 구조적 보장이다.
+_MIN_PER_SOURCE_TYPE = 5
+
 
 def _article_citation_needles(query: str) -> list[str]:
     needles: list[str] = []
@@ -156,11 +167,16 @@ class HybridRetriever:
         # 2) 어휘(BM25) + 벡터 두 채널의 후보를 RRF로 융합
         pool = self._recall_candidates(query, dept, as_of, top_k, entity_types, seen_ids)
 
-        # 3) 융합된 후보 풀을 리랭킹해 상위 top_k만 남긴다
-        if pool:
-            texts = [f"{doc.entity.title}\n{doc.entity.body}" for doc in pool]
-            for item in self.reranker.rerank(query, texts, top_k):
-                candidate = pool[item.index]
+        # 3) 전체 top_k 컷 + 소스별 최소 보장을 합집합으로 선정한 뒤 리랭킹
+        selected = self._stratify_by_source(pool, top_k, entity_types)
+        if selected:
+            texts = [f"{doc.entity.title}\n{doc.entity.body}" for doc in selected]
+            # top_n을 선정된 후보 수와 동일하게 줘서, 리랭커는 이 합집합을
+            # 다시 솎아내지 않고 순서만 재조정한다 -- 그래야 소스별 최소
+            # 보장이 리랭킹 단계에서 다시 깨지지 않는다(NoOpReranker/
+            # VoyageReranker 둘 다 top_n==len(documents)면 전량 보존).
+            for item in self.reranker.rerank(query, texts, len(selected)):
+                candidate = selected[item.index]
                 seen_ids.add(candidate.entity.id)
                 documents.append(RetrievedDocument(candidate.entity, item.score, candidate.reason))
 
@@ -182,6 +198,45 @@ class HybridRetriever:
         # 5) 권위 위계 순으로 재배열 (같은 위계 안에서는 관련성 순)
         documents.sort(key=lambda doc: (authority_rank(doc.entity.type), -doc.score))
         return documents
+
+    def _stratify_by_source(
+        self,
+        pool: list[RetrievedDocument],
+        top_k: int,
+        entity_types: tuple[EntityType, ...] | None,
+    ) -> list[RetrievedDocument]:
+        """RRF 융합 순위(pool)에서 "전체 top_k" 컷과 "소스(entity_type)별
+        상위 _MIN_PER_SOURCE_TYPE개" 를 합집합으로 선정한다. LLM이 이미
+        source_types로 단일 타입을 지정했다면 소스 간 경쟁 자체가 없으므로
+        계층화는 의미가 없다 -- 그 경우는 원래의 flat top_k 컷만 쓴다."""
+        if entity_types is not None and len(entity_types) == 1:
+            return pool[:top_k]
+
+        selected_ids: set[str] = set()
+        selected: list[RetrievedDocument] = []
+
+        def add(doc: RetrievedDocument) -> None:
+            if doc.entity.id not in selected_ids:
+                selected_ids.add(doc.entity.id)
+                selected.append(doc)
+
+        for doc in pool[:top_k]:
+            add(doc)
+
+        per_type_count: dict[EntityType, int] = {}
+        for doc in pool:
+            count = per_type_count.get(doc.entity.type, 0)
+            if count >= _MIN_PER_SOURCE_TYPE:
+                continue
+            per_type_count[doc.entity.type] = count + 1
+            add(doc)
+
+        # pool의 융합 순위 그대로 정렬 상태를 유지한다 -- 리랭커에게 전달할
+        # 순서 자체는 중요하지 않지만(리랭커가 다시 정렬함), 결과를 읽을 때
+        # 디버깅하기 쉽도록 회수 순위를 보존해 둔다.
+        order = {doc.entity.id: i for i, doc in enumerate(pool)}
+        selected.sort(key=lambda doc: order[doc.entity.id])
+        return selected
 
     def _recall_candidates(
         self,

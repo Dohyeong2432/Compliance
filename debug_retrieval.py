@@ -4,10 +4,16 @@
   [1] 실제 /chat과 동일한 조건 -- 지정한 top_k(기본 6, 내부 회수폭은
       top_k * _RECALL_WIDTH_MULTIPLIER)로 retrieve()를 호출한 최종 결과.
       LLM이 search_knowledge를 이 top_k로 호출했다면 정확히 이걸 받는다.
+      retrieve() 내부에서 _stratify_by_source()가 "flat top_k 컷"과
+      "소스(entity_type)별 상위 _MIN_PER_SOURCE_TYPE개"의 합집합을 만들기
+      때문에, 최종 문서 수는 top_k보다 많을 수 있다(등장하는 소스 타입
+      수에 비례).
   [2] 회수 폭과 무관한 채널 내 진짜 전체 순위 -- _recall_candidates()를
       사실상 무제한에 가까운 폭으로 직접 호출해, BM25/벡터 채널에서 각
       문서가 원래 몇 등이었는지를 보여준다. [1]에 법령이 없었을 때, 이걸로
-      "법령이 몇 등이라 회수 폭이 부족했는지" 정확히 알 수 있다.
+      "법령이 애초에 회수 폭(recall width) 밖이라 놓쳤는지" 정확히 알 수
+      있다 -- 소스별 최소 보장 덕분에, 회수 폭 안에만 들어오면 최종 top_k
+      컷에서 밀려나는 일은 이제 없다.
 
 주의: 여기 찍히는 "점수"는 기본 리랭커(NoOpReranker)가 매기는 값인데,
 이건 실제 유사도가 아니라 "이미 RRF로 정렬된 후보 목록에서 몇 번째였는지"를
@@ -24,6 +30,7 @@ import sys
 from datetime import date
 
 from bootstrap import build_components
+from knowledge.retriever import _RECALL_WIDTH_MULTIPLIER
 from ontology.schema import authority_rank
 
 QUERY = sys.argv[1] if len(sys.argv) > 1 else "자금세탁방지 보고책임자의 직급이 차장인데 문제 없을까?"
@@ -83,20 +90,35 @@ _print_results(
     "",
 )
 
-# 진단: [1]에 법령이 없는데 [2]에는 있다면, 정확히 몇 등이라 놓쳤는지와
-# 회수 배율을 얼마로 올려야 하는지 계산해서 알려준다.
+# 진단: [1]에 법령이 없는데 [2]에는 있다면, 원인은 이제 둘 중 하나뿐이다 --
+# (a) 회수 폭(recall_k = top_k * _RECALL_WIDTH_MULTIPLIER) 밖이라 애초에
+#     _recall_candidates()가 못 건져온 경우, 또는
+# (b) 회수 폭 안에는 들어왔는데도 [1]에 없는 경우 -- 이건 _stratify_by_source()가
+#     "소스별 상위 _MIN_PER_SOURCE_TYPE개는 무조건 포함"하도록 되어 있으므로
+#     정상적으로는 발생하지 않아야 하는 상황이다(발생하면 스크립트 인자로 준
+#     entity_types와 실제 /chat 호출의 entity_types가 다르거나, 회귀 버그다).
 real_has_law = any(d.entity.id.startswith("law:") for d in real_results)
 law_in_full = [d for d in full_pool if d.entity.id.startswith("law:")]
+recall_k = REAL_TOP_K * _RECALL_WIDTH_MULTIPLIER
 if not real_has_law and law_in_full:
     true_rank = full_pool.index(law_in_full[0]) + 1
-    needed_multiplier = -(-true_rank // REAL_TOP_K)  # 올림 나눗셈
-    print(
-        f"진단: 법령 최고 순위는 채널 융합 기준 {true_rank}등입니다. "
-        f"top_k={REAL_TOP_K}에서 이 문서를 회수하려면 "
-        f"_RECALL_WIDTH_MULTIPLIER가 최소 {needed_multiplier} 이상이어야 합니다 "
-        f"(knowledge/retriever.py의 현재 값과 비교해보세요)."
-    )
+    if true_rank > recall_k:
+        needed_multiplier = -(-true_rank // REAL_TOP_K)  # 올림 나눗셈
+        print(
+            f"진단: 법령 최고 순위는 채널 융합 기준 {true_rank}등인데, "
+            f"top_k={REAL_TOP_K}의 회수 폭은 {recall_k}등까지만 봅니다. "
+            f"_RECALL_WIDTH_MULTIPLIER가 최소 {needed_multiplier} 이상이어야 "
+            f"이 문서가 회수 후보 풀에 듭니다(knowledge/retriever.py)."
+        )
+    else:
+        print(
+            f"진단: 법령(채널 융합 기준 {true_rank}등)이 회수 폭({recall_k}등) "
+            "안에는 들어왔는데도 [1] 최종 결과에는 없습니다 -- 정상 동작이라면 "
+            "_stratify_by_source()가 소스별 최소 보장으로 반드시 포함시켜야 "
+            "하는 상황입니다. entity_types 필터가 다르게 걸렸는지, 혹은 회귀"
+            "버그인지 knowledge/retriever.py를 확인하세요."
+        )
 elif real_has_law:
-    print("진단: 법령이 이미 [1] 실사용 조건에서도 회수됨 -- 회수 폭 문제 아님.")
+    print("진단: 법령이 이미 [1] 실사용 조건에서도 회수됨 -- 회수 폭/최종 컷 문제 아님.")
 else:
     print("진단: [2] 무제한 회수에서도 법령이 전혀 안 잡힘 -- 회수 폭 문제가 아니라 이 쿼리 표현 자체가 법령 원문과 어휘/의미적으로 거리가 먼 것.")
