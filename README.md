@@ -25,6 +25,52 @@ CLI 도구 `pandoc`, `catdoc`, `pdftotext`(poppler-utils 패키지)가 설치되
 합니다 (`apt-get install pandoc catdoc poppler-utils`). Python 패키지만으로는
 해결되지 않는 부분이라 requirements.txt에는 포함되어 있지 않습니다.
 
+### Windows에서 처음 설정할 때
+
+사내망 환경(SSL 인터셉션 프록시·백신)과 법령 크롤러 의존성을 하나씩 뒤늦게
+발견하며 서버를 여러 번 재시작하는 일이 없도록, 처음 설정 시 아래 순서를
+한 번에 따라가세요.
+
+```powershell
+# 1. 가상환경 생성 + 활성화
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# 2. 서버 기본 의존성 설치
+pip install -r requirements.txt
+
+# 3. Windows 시스템 인증서 저장소를 그대로 쓰도록 패치 -- 사내 프록시·백신이
+#    HTTPS를 가로채는 환경(SSL 인터셉션)에서는 이게 없으면 Gemini/Voyage 등
+#    외부 API 호출이 CERTIFICATE_VERIFY_FAILED로 실패합니다. 미리 깔아두면
+#    나중에 겪을 필요가 없습니다.
+pip install pip-system-certs
+
+# 4. 법령 크롤러(LAW_CRAWLER)를 쓸 경우에만: 크롤러 전용 의존성 설치
+#    -- selenium/pandas/beautifulsoup4 등 서버 배포판에는 일부러 안 넣은
+#    별도 requirements 파일입니다 (crawlers/requirements.txt 참고).
+pip install -r crawlers/requirements.txt
+```
+
+Python 패키지 설치만으로 끝나지 않는 것도 두 가지 있습니다:
+
+- **법령 크롤러**: Selenium이 제어할 **Chrome(또는 Chromium) 브라우저**가
+  로컬에 설치되어 있어야 합니다(드라이버는 `webdriver-manager`가 자동으로
+  받아오지만, 브라우저 자체는 별도 설치가 필요합니다).
+- **사규/검토서/FAQ/계약검토 선례 문서 로더**: 위에서 언급한 `pandoc`,
+  `catdoc`, `pdftotext`가 PATH에 있어야 합니다. 설치 여부는 아래로 확인:
+  ```powershell
+  Get-Command pandoc, catdoc, pdftotext -ErrorAction SilentlyContinue
+  ```
+  `pandoc`은 [pandoc.org](https://pandoc.org/installing.html) 설치파일(.msi) 또는
+  `winget install --id JohnMacFarlane.Pandoc`로 쉽게 깔립니다. `catdoc`,
+  `pdftotext`(poppler)는 Windows 공식 설치파일이 따로 없어 바이너리를 받아
+  PATH에 직접 등록해야 합니다.
+
+설정이 끝나면 서버를 띄운 뒤 `/admin/resync`(아래 "자동 재색인/동기화" 참고)를
+호출해 소스별 `ingested` 건수가 0이 아닌지 확인하세요 — 색인 성공 로그
+(`logger.info()`)는 기본 로깅 설정상 콘솔에 표시되지 않으므로, 이 API 응답이
+실제로 문서가 색인됐는지 확인할 수 있는 가장 확실한 방법입니다.
+
 ## 환경변수(.env) 관리
 
 비밀값(SSO 시크릿, API 키 등)은 `.env.example`을 복사해 `.env`로 만들고 채우세요.
