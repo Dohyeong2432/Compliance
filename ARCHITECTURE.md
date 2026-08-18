@@ -231,6 +231,19 @@ RBAC/시점 판정은 하지 않고 `(entity_id, score)`만 돌려줍니다 — 
   (`api/main.py`의 `_build_agent(..., max_tool_iterations=...)`),
   `/chat`은 기존 `agent.harness.MAX_TOOL_ITERATIONS`(4) 그대로 둔다 — 짧은
   채팅 질문에까지 한도를 늘리면 지연·비용만 커진다.
+- **계약검토 선례 DB** (`EntityType.PRECEDENT`, `pipeline/connectors/precedent.py`):
+  "과거에 비슷한 조항을 어떻게 판단했는지"를 지속적으로 보완하려면 근거
+  축적이 필요한데, `/contract-review`가 만든 검토 결과를 자동으로 이 소스에
+  채워넣지 않는다 — 검증 안 된 자동 판단이 그대로 "선례"로 굳어지면 같은
+  오류가 반복 재생산될 위험이 있기 때문이다. 대신 REGULATION/REVIEW/FAQ와
+  동일한 로컬 파일 스테이징 패턴을 그대로 재사용한다: 준법감시부가
+  검토·승인한 사례 문서만 `data/raw/precedent/`(`PRECEDENT_DOCS_DIR`)에
+  올리면 `LocalFilePrecedentConnector`가 자동 색인한다(조문 분리 없이
+  파일 하나 = 문서 하나, REVIEW/FAQ와 동일). 권위 위계상 최하위(FAQ보다도
+  아래, `AUTHORITY_RANK[PRECEDENT] = 7`)로 두고, `CLAUSE_REVIEW_PROMPT_TEMPLATE`이
+  `source_types=["precedent"]`로 유사 사례를 찾아보라고 LLM에 안내한다.
+  체크리스트(정적으로 "무엇을 확인할지")와 선례 DB(동적으로 "그 판단에
+  참고할 근거")는 상호보완적인 별개의 두 축이다.
 - `build_review_document(...)`가 `python-docx`로 검토의견서를 조립한다. 원본
   워드파일에 코멘트를 삽입하는 대신 별도 문서를 새로 생성하는 방식을
   택했다 — python-docx의 네이티브 코멘트 API는 저수준 OOXML 조작이 필요해
@@ -244,7 +257,7 @@ RBAC/시점 판정은 하지 않고 `(entity_id, score)`만 돌려줍니다 — 
   타임아웃이 실제로 문제가 되면 이후 비동기 방식으로 전환 검토.
 
 ### `pipeline/`
-6개 커넥터(`pipeline/connectors/*`) 중 REGULATION/REVIEW/FAQ는 로컬 파일
+7개 커넥터(`pipeline/connectors/*`) 중 REGULATION/REVIEW/FAQ/PRECEDENT는 로컬 파일
 스테이징으로, LAW/INTERPRETATION/CASE는 주입된 크롤러 콜백으로 실제 동작합니다
 (둘 다 `documents=`를 주입하면 dev-mode로 고정 목록을 그대로 반환하는 경로도
 그대로 남아 있어, `seed_data/seed.py`나 테스트에서 파이프라인 전체를

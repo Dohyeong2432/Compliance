@@ -22,6 +22,7 @@ class EntityType(str, Enum):
     REGULATION = "regulation"      # 사내 규정/지침
     REVIEW = "review"              # 내부 검토서 (부서 한정 접근)
     FAQ = "faq"                    # 준법감시부 FAQ
+    PRECEDENT = "precedent"        # 계약검토 선례 (준법감시부 승인 사례, 제재사례(CASE)와는 별개)
 
 
 class RelationType(str, Enum):
@@ -56,6 +57,7 @@ AUTHORITY_RANK: dict[EntityType, int] = {
     EntityType.CASE: 4,
     EntityType.REVIEW: 5,
     EntityType.FAQ: 6,
+    EntityType.PRECEDENT: 7,
 }
 
 # LLM에게 그대로 노출되는 위계 설명. "구속력 없음"처럼 답변 태도가 달라져야
@@ -68,6 +70,7 @@ AUTHORITY_LABEL: dict[EntityType, str] = {
     EntityType.CASE: "제재사례 (집행 선례)",
     EntityType.REVIEW: "내부 검토서 (참고 의견, 구속력 없음)",
     EntityType.FAQ: "FAQ (내부 정리자료, 구속력 없음)",
+    EntityType.PRECEDENT: "계약검토 선례 (내부 참고사례, 구속력 없음)",
 }
 
 _LOWEST_AUTHORITY = max(AUTHORITY_RANK.values()) + 1

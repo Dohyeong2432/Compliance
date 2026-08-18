@@ -33,6 +33,7 @@ def api_env(monkeypatch, tmp_path):
     monkeypatch.setenv("REGULATION_DOCS_DIR", str(tmp_path / "no-regulation"))
     monkeypatch.setenv("REVIEW_DOCS_DIR", str(tmp_path / "no-review"))
     monkeypatch.setenv("FAQ_DOCS_DIR", str(tmp_path / "no-faq"))
+    monkeypatch.setenv("PRECEDENT_DOCS_DIR", str(tmp_path / "no-precedent"))
     monkeypatch.setenv("SYNC_STATE_PATH", str(tmp_path / "sync_state.json"))
     monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
     monkeypatch.delenv("LAW_CRAWLER", raising=False)
@@ -157,6 +158,25 @@ def test_startup_sync_ingests_regulation_docs_dir(api_env, monkeypatch, tmp_path
         # startup sync already ran by the time the context manager returns
         assert main_module.app.state.components.graph_store.has_entity("regulation:1")
         del client  # unused, just need the context open through startup
+
+
+def test_startup_sync_ingests_precedent_docs_dir(api_env, monkeypatch, tmp_path, require_pandoc):
+    prec_dir = tmp_path / "precedent"
+    prec_dir.mkdir()
+    md = tmp_path / "source.md"
+    md.write_text("업무위탁계약 검토 사례\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(prec_dir / "1. 사례.docx")], check=True)
+    monkeypatch.setenv("PRECEDENT_DOCS_DIR", str(prec_dir))
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        assert main_module.app.state.components.graph_store.has_entity("precedent:1")
+        del client
 
 
 def test_admin_resync_requires_auth(api_env):

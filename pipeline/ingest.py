@@ -1,9 +1,9 @@
 """Ingest orchestration: RawDocument (from any connector) -> ontology
 Entity/Relation -> graph store + vector store.
 
-REVIEW-type documents are always masked here, regardless of whether the
-originating connector already did so — this is the one place ingest can't
-be skipped by a connector bug.
+REVIEW/PRECEDENT-type documents are always masked here, regardless of
+whether the originating connector already did so — this is the one place
+ingest can't be skipped by a connector bug.
 """
 
 from __future__ import annotations
@@ -23,10 +23,18 @@ from pipeline.connectors.base import RawDocument, SourceConnector
 from pipeline.masking import mask_pii
 
 # 이 타입들만 본문에서 법령 인용("「OO법」 제N조" 등)을 자동 스캔해 CITES
-# 관계를 만든다 -- LAW/REGULATION 자체는 인용의 "대상"이지 "출처"가
-# 아니므로 제외한다 (법이 다른 법을 인용하는 경우도 있지만 지금 범위 밖).
+# 관계를 만든다 -- LAW 자체는 인용의 "대상"이지 "출처"가 아니므로 제외한다
+# (법이 다른 법을 인용하는 경우도 있지만 지금 범위 밖). PRECEDENT(계약검토
+# 선례)도 근거 법령을 「」로 인용하는 관행을 따를 것으로 예상돼 포함한다.
 _AUTO_CITATION_SOURCE_TYPES = frozenset(
-    {EntityType.INTERPRETATION, EntityType.CASE, EntityType.REVIEW, EntityType.FAQ, EntityType.REGULATION}
+    {
+        EntityType.INTERPRETATION,
+        EntityType.CASE,
+        EntityType.REVIEW,
+        EntityType.FAQ,
+        EntityType.REGULATION,
+        EntityType.PRECEDENT,
+    }
 )
 
 
@@ -124,7 +132,7 @@ class IngestPipeline:
 
         entities: list[Entity] = []
         for doc in documents:
-            body = mask_pii(doc.body) if doc.entity_type == EntityType.REVIEW else doc.body
+            body = mask_pii(doc.body) if doc.entity_type in (EntityType.REVIEW, EntityType.PRECEDENT) else doc.body
             entities.append(
                 Entity(
                     id=doc.entity_id,

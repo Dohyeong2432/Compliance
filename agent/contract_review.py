@@ -30,6 +30,8 @@ CLAUSE_REVIEW_PROMPT_TEMPLATE = """아래는 검토 대상 계약서의 한 조�
 이 조항 유형에서 특히 확인할 사항:
 {checklist}
 
+필요하면 source_types=["precedent"]로 유사한 과거 계약검토 사례도 검색해 참고하십시오.
+
 [{label}]
 {text}"""
 

@@ -38,6 +38,7 @@ from pipeline.connectors.faq import LocalFileFaqConnector
 from pipeline.connectors.interpretation import InterpretationConnector
 from pipeline.connectors.law import LawConnector
 from pipeline.connectors.local_file import LocalFileRegulationConnector
+from pipeline.connectors.precedent import LocalFilePrecedentConnector
 from pipeline.connectors.review import LocalFileReviewConnector
 from pipeline.ingest import IngestPipeline
 from pipeline.sync import IngestSyncer
@@ -132,20 +133,25 @@ def _import_callable(path: str) -> Callable[[], list[dict[str, Any]]]:
 def _build_connectors() -> dict[str, SourceConnector]:
     """Registers every source this deployment currently knows how to read.
 
-    REGULATION/REVIEW/FAQ are always registered as local-file connectors
-    (pointed at a docs directory that may simply not exist yet -- fetch()
-    returns [] in that case rather than erroring). LAW/INTERPRETATION/CASE
-    are crawler-backed and only registered once their *_CRAWLER env var
+    REGULATION/REVIEW/FAQ/PRECEDENT are always registered as local-file
+    connectors (pointed at a docs directory that may simply not exist yet --
+    fetch() returns [] in that case rather than erroring). LAW/INTERPRETATION/
+    CASE are crawler-backed and only registered once their *_CRAWLER env var
     points at an actual importable function -- there's deliberately no
     built-in scraping logic for law.go.kr / 금융위·금감원 질의회신 /
     금감원 제재정보공개 baked into this codebase (see each connector's
     module docstring for why), so until that env var is set, those three
     sources are simply absent from sync rather than raising on every cycle.
+
+    PRECEDENT(계약검토 선례)는 다른 셋과 달리 "완료·승인된 사례만 이 폴더에
+    올린다"는 사람의 큐레이션에 의존한다 -- 자동 검토 결과를 자동으로
+    채워넣는 경로는 없다(agent/contract_review.py 참고).
     """
     connectors: dict[str, SourceConnector] = {
         "regulation": LocalFileRegulationConnector(os.environ.get("REGULATION_DOCS_DIR", "./data/raw/regulation")),
         "review": LocalFileReviewConnector(os.environ.get("REVIEW_DOCS_DIR", "./data/raw/review")),
         "faq": LocalFileFaqConnector(os.environ.get("FAQ_DOCS_DIR", "./data/raw/faq")),
+        "precedent": LocalFilePrecedentConnector(os.environ.get("PRECEDENT_DOCS_DIR", "./data/raw/precedent")),
     }
 
     crawler_connectors = {

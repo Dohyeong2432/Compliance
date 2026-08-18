@@ -50,8 +50,9 @@ def test_authority_rank_orders_binding_norms_above_internal_references():
         authority_rank(EntityType.CASE),
         authority_rank(EntityType.REVIEW),
         authority_rank(EntityType.FAQ),
+        authority_rank(EntityType.PRECEDENT),
     ]
-    assert ranks == sorted(ranks), "권위 위계가 법령→사내규정→유권해석→제재사례→검토서→FAQ 순이어야 한다"
+    assert ranks == sorted(ranks), "권위 위계가 법령→사내규정→유권해석→제재사례→검토서→FAQ→계약검토 선례 순이어야 한다"
     assert len(set(ranks)) == len(ranks), "동순위가 있으면 정렬 결과가 비결정적이 된다"
 
 

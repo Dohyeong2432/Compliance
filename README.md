@@ -65,12 +65,13 @@ pipeline = IngestPipeline(components.embedder, components.vector_store, componen
 seed_all(pipeline)
 ```
 
-## 문서 기반 소스: 사규 / 검토서 / FAQ
+## 문서 기반 소스: 사규 / 검토서 / FAQ / 계약검토 선례
 
-세 소스 모두 실 시스템(EDMS/사내 위키) 연동 전까지 같은 방식으로 채웁니다 —
-docx/doc/pdf 원문을 아래 디렉터리에 그대로 올려두면 됩니다. `uvicorn api.main:app`으로
-서버를 띄우면 **시작 시 자동으로 색인되므로, 별도 스크립트를 수동으로 돌릴 필요는
-없습니다** (아래 "자동 재색인/동기화" 참고). 서버 없이 한 번만 색인하고 싶다면:
+네 소스 모두 실 시스템(EDMS/사내 위키/사례관리시스템) 연동 전까지 같은 방식으로
+채웁니다 — docx/doc/pdf 원문을 아래 디렉터리에 그대로 올려두면 됩니다.
+`uvicorn api.main:app`으로 서버를 띄우면 **시작 시 자동으로 색인되므로, 별도
+스크립트를 수동으로 돌릴 필요는 없습니다** (아래 "자동 재색인/동기화" 참고).
+서버 없이 한 번만 색인하고 싶다면:
 
 ```python
 from bootstrap import build_components
@@ -78,6 +79,7 @@ from pipeline.ingest import IngestPipeline
 from pipeline.connectors.local_file import LocalFileRegulationConnector
 from pipeline.connectors.review import LocalFileReviewConnector
 from pipeline.connectors.faq import LocalFileFaqConnector
+from pipeline.connectors.precedent import LocalFilePrecedentConnector
 
 components = build_components()
 pipeline = IngestPipeline(components.embedder, components.vector_store, components.graph_store)
@@ -86,12 +88,13 @@ for connector in [
     LocalFileRegulationConnector("data/raw/regulation"),
     LocalFileReviewConnector("data/raw/review"),   # 부서 한정 문서는 하위 폴더로 구분 (data/raw/review/README.md)
     LocalFileFaqConnector("data/raw/faq"),
+    LocalFilePrecedentConnector("data/raw/precedent"),  # 준법감시부가 승인한 사례만 (data/raw/precedent/README.md)
 ]:
     pipeline.ingest_connector(connector)
     print(connector.entity_type.value, "실패:", connector.errors)  # DRM/손상 등으로 못 읽은 파일과 사유
 ```
 
-세 커넥터 모두 시스템에 다음 CLI 도구가 설치되어 있어야 합니다: `pandoc`(.docx),
+네 커넥터 모두 시스템에 다음 CLI 도구가 설치되어 있어야 합니다: `pandoc`(.docx),
 `catdoc`(.doc, 레거시 CP949 인코딩), `pdftotext`(.pdf, poppler-utils 패키지).
 확장자만 `.docx`인데 실제로는 DRM 등으로 암호화된 파일은 파싱에 실패하며
 `connector.errors`에 사유와 함께 남고, 나머지 파일 처리는 막히지 않습니다.

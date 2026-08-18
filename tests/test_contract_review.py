@@ -63,6 +63,19 @@ def test_review_contract_includes_clause_label_and_text_in_prompt():
     assert "이 계약은 목적을 정한다." in sent_prompt
 
 
+def test_review_contract_prompt_nudges_precedent_search():
+    """계약검토 선례 DB(source_types=["precedent"])를 검색해보라는 안내가
+    프롬프트에 포함돼야 LLM이 이 소스의 존재를 인지하고 활용할 수 있다."""
+    text = "제1조(목적) 이 계약은 목적을 정한다."
+    script = [_final_response("문제 없음")]
+    agent = _build_agent(script)
+
+    review_contract(text, agent)
+
+    sent_prompt = agent.llm_client.calls[0]["messages"][0]["content"]
+    assert 'source_types=["precedent"]' in sent_prompt
+
+
 def test_review_contract_falls_back_to_whole_document_without_article_headings():
     """"제N조(제목)" 구조가 없는 계약서(영문 계약, 단순 번호 목록 등)는 통째로
     한 건으로 검토돼야 한다 -- 사규 파서와 같은 폴백."""

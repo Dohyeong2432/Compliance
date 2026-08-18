@@ -57,6 +57,26 @@ def test_non_review_body_is_not_masked():
     assert "010-1234-5678" in entity.body
 
 
+def test_precedent_body_is_masked_on_ingest():
+    """계약검토 선례도 REVIEW와 동일하게 상대방 연락처 등 민감정보 노출
+    위험이 있어 마스킹 대상이다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store)
+
+    doc = RawDocument(
+        external_id="p1",
+        entity_type=EntityType.PRECEDENT,
+        title="계약검토 사례",
+        body="계약 상대방 담당자 연락처 010-1234-5678 확인",
+        allowed_depts=("IB",),
+    )
+    pipeline.ingest_documents([doc])
+
+    entity = graph_store.get_entity("precedent:p1")
+    assert "010-1234-5678" not in entity.body
+
+
 def test_relations_are_created_in_graph():
     graph_store = NetworkXGraphStore()
     vector_store = InMemoryVectorStore()
@@ -127,6 +147,33 @@ def test_ingest_auto_citation_extraction_only_applies_to_citing_source_types():
     pipeline.ingest_documents(docs)
 
     assert graph_store.relations_from("law:47-0", RelationType.CITES) == []
+
+
+def test_ingest_precedent_body_is_scanned_for_law_citations():
+    """계약검토 선례도 사례 서술 중 근거 법령을 「」로 인용하는 관행을
+    따를 것으로 예상돼, 사규와 동일하게 인용 스캔 대상이다."""
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store)
+
+    docs = [
+        RawDocument(
+            external_id="47-0",
+            entity_type=EntityType.LAW,
+            title="금융지주회사법 제47조(자회사등 사이의 업무위탁)",
+            body="자회사등은 업무의 일부를 다른 자회사등에게 위탁할 수 있다.",
+        ),
+        RawDocument(
+            external_id="p1",
+            entity_type=EntityType.PRECEDENT,
+            title="업무위탁계약 검토 사례",
+            body="「금융지주회사법」 제47조에 따라 위탁 범위를 축소하도록 수정 요청함.",
+        ),
+    ]
+    pipeline.ingest_documents(docs)
+
+    rels = graph_store.relations_from("precedent:p1", RelationType.CITES)
+    assert [r.target_id for r in rels] == ["law:47-0"]
 
 
 def test_ingest_regulation_body_is_scanned_for_law_citations():

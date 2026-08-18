@@ -15,6 +15,7 @@ from pipeline.connectors.local_file import (
     _parse_title,
     split_into_articles,
 )
+from pipeline.connectors.precedent import LocalFilePrecedentConnector
 from pipeline.connectors.review import LocalFileReviewConnector
 
 
@@ -269,3 +270,51 @@ def test_regulation_connector_falls_back_to_whole_file_without_article_headings(
     assert len(docs) == 1
     assert docs[0].external_id == "42"
     assert docs[0].title == "업무분장표"
+
+
+# ---------------------------------------------------------------------------
+# LocalFilePrecedentConnector (계약검토 선례)
+# ---------------------------------------------------------------------------
+
+
+def test_precedent_connector_indexes_file_as_single_whole_document(tmp_path, require_pandoc):
+    """사례 문서는 사규와 달리 "제N조" 구조가 아니라 서술문이므로, 조문
+    분리 없이 파일 하나가 문서 하나가 돼야 한다(REVIEW/FAQ와 동일)."""
+    md = tmp_path / "source.md"
+    md.write_text(
+        "2024 업무위탁계약 검토 사례\n\n"
+        "제1조(목적)와 유사한 조항을 검토한 사례입니다. 위탁 범위가 과도하게 넓어 수정 요청함.",
+        encoding="utf-8",
+    )
+    subprocess.run(["pandoc", str(md), "-o", str(tmp_path / "1. 업무위탁 사례.docx")], check=True)
+
+    connector = LocalFilePrecedentConnector(str(tmp_path))
+    docs = connector.fetch()
+
+    assert len(docs) == 1
+    assert docs[0].entity_type == EntityType.PRECEDENT
+    assert docs[0].title == "2024 업무위탁계약 검토 사례"
+
+
+def test_precedent_connector_subfolder_restricts_allowed_depts(tmp_path, require_pandoc):
+    ib_dir = tmp_path / "IB"
+    ib_dir.mkdir()
+    md = tmp_path / "source.md"
+    md.write_text("IB 전용 검토 사례\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(ib_dir / "1. IB 사례.docx")], check=True)
+
+    connector = LocalFilePrecedentConnector(str(tmp_path))
+    docs = connector.fetch()
+
+    assert docs[0].allowed_depts == ("IB",)
+
+
+def test_precedent_connector_root_level_file_is_firm_wide(tmp_path, require_pandoc):
+    md = tmp_path / "source.md"
+    md.write_text("전사 공통 비밀유지계약 검토 사례\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(tmp_path / "1. 사례.docx")], check=True)
+
+    connector = LocalFilePrecedentConnector(str(tmp_path))
+    docs = connector.fetch()
+
+    assert docs[0].allowed_depts == (ALL_DEPARTMENTS,)
