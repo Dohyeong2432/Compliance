@@ -96,6 +96,15 @@ POC_UI_ENABLED = os.environ.get("POC_UI_ENABLED", "").lower() == "true"
 POC_DEPT = os.environ.get("POC_DEPT", "compliance")
 _POC_HTML_PATH = Path(__file__).resolve().parent.parent / "poc" / "chat.html"
 
+# /chat의 도구 호출 반복 한도. 기본값은 agent.harness.MAX_TOOL_ITERATIONS(4) 그대로
+# 두되, 환경변수로 올릴 수 있게 한다 -- /contract-review가 이미
+# CONTRACT_REVIEW_MAX_TOOL_ITERATIONS(8)로 "여러 법령이 얽혀 한 번의 왕복으로
+# 안 끝나는" 경우를 검증해 뒀으므로, /chat에서도 같은 성격의 다단계 조사가
+# 필요하면 코드 수정 없이 CHAT_MAX_TOOL_ITERATIONS만 올리면 된다. 반복은
+# 병렬이 아니라 순차 LLM 왕복이라 값을 올릴수록 최악의 경우 응답 지연과
+# 누적 토큰 비용이 함께 늘어난다는 점을 감안해서 정할 것.
+CHAT_MAX_TOOL_ITERATIONS = int(os.environ.get("CHAT_MAX_TOOL_ITERATIONS") or MAX_TOOL_ITERATIONS)
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -154,10 +163,14 @@ def _build_agent(
 ) -> ComplianceAgent:
     """/chat과 /contract-review이 공유하는 요청별 ComplianceAgent 생성.
 
-    max_tool_iterations는 /chat에서는 기본값(agent.harness.MAX_TOOL_ITERATIONS)을
-    그대로 쓰고, /contract-review에서만 더 높은 값을 넘긴다 -- 계약 조항은
-    여러 법령이 얽혀 근거 조사가 한 번의 왕복으로 안 끝나는 경우가 있는
-    반면, 짧은 채팅 질문에까지 한도를 늘리면 불필요하게 지연·비용만 커진다."""
+    max_tool_iterations는 /chat에서는 CHAT_MAX_TOOL_ITERATIONS(기본값은
+    agent.harness.MAX_TOOL_ITERATIONS=4)를, /contract-review에서는
+    CONTRACT_REVIEW_MAX_TOOL_ITERATIONS(8)를 넘긴다 -- 계약 조항은 여러
+    법령이 얽혀 근거 조사가 한 번의 왕복으로 안 끝나는 경우가 있어 애초에
+    더 높게 잡았고, /chat도 다단계 조사가 필요한 배포 환경이면 코드 수정
+    없이 CHAT_MAX_TOOL_ITERATIONS로 올릴 수 있다 -- 다만 반복은 순차 LLM
+    왕복이라, 값을 올릴수록 최악의 경우 응답 지연과 누적 토큰 비용이 함께
+    커진다."""
     try:
         llm_client = _get_llm_client()
     except Exception as exc:  # optional dependency / missing API key
@@ -178,7 +191,7 @@ def _build_agent(
 def chat(request: ChatRequest, authorization: str | None = Header(default=None)) -> ChatResponse:
     components: AppComponents = app.state.components
     session = _authenticate(authorization, components)
-    agent = _build_agent(session, components)
+    agent = _build_agent(session, components, max_tool_iterations=CHAT_MAX_TOOL_ITERATIONS)
 
     result = agent.ask(request.message)
     return ChatResponse(
