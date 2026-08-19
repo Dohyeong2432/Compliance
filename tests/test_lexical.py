@@ -108,3 +108,59 @@ def test_search_respects_top_k():
         index.index(f"law:{i}", "업무위탁 관련 조항")
 
     assert len(index.search("업무위탁", top_k=2)) == 2
+
+
+def test_save_without_persist_path_is_a_noop(tmp_path):
+    # 개발용 기본 구성(LexicalIndex())에는 persist_path가 없다 -- 그런 경우
+    # save()가 파일을 만들려 들면 안 된다(경로가 없으니 어차피 못 만들지만,
+    # 예외 없이 조용히 넘어가야 한다는 걸 확인한다).
+    index = LexicalIndex()
+    index.index("law:1", "업무위탁 관련 조항")
+    index.save()  # must not raise
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_and_reload_round_trip(tmp_path):
+    """sync 사이클이 끝난 뒤 저장된 파일을, 재시작한 새 프로세스가 읽어서
+    검색 가능한 상태로 복원할 수 있어야 한다 -- SYNC_ON_STARTUP=false로 시작
+    시 재색인을 건너뛸 때 이게 없으면 BM25 채널이 매번 빈 채로 뜬다."""
+    path = tmp_path / "lexical_index.json"
+    index = LexicalIndex(persist_path=path)
+    index.index("law:1", "업무위탁 관련 조항")
+    index.index("law:2", "겸직 제한 관련 조항")
+    index.save()
+    assert path.exists()
+
+    restored = LexicalIndex(persist_path=path)
+    assert [m.entity_id for m in restored.search("업무위탁")] == ["law:1"]
+    assert [m.entity_id for m in restored.search("겸직")] == ["law:2"]
+    assert len(restored) == 2
+
+
+def test_deleted_document_stays_deleted_after_save_and_reload(tmp_path):
+    path = tmp_path / "lexical_index.json"
+    index = LexicalIndex(persist_path=path)
+    index.index("law:1", "업무위탁 관련 조항")
+    index.index("law:2", "겸직 제한 관련 조항")
+    index.save()
+
+    index.delete("law:1")
+    index.save()
+
+    restored = LexicalIndex(persist_path=path)
+    assert restored.search("업무위탁") == []
+    assert [m.entity_id for m in restored.search("겸직")] == ["law:2"]
+    assert len(restored) == 1
+
+
+def test_missing_persist_file_starts_empty_without_raising(tmp_path):
+    index = LexicalIndex(persist_path=tmp_path / "does-not-exist.json")
+    assert len(index) == 0
+    assert index.search("아무 질의") == []
+
+
+def test_corrupt_persist_file_starts_empty_without_raising(tmp_path):
+    path = tmp_path / "lexical_index.json"
+    path.write_text("이건 JSON이 아닙니다", encoding="utf-8")
+    index = LexicalIndex(persist_path=path)
+    assert len(index) == 0

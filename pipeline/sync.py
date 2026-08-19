@@ -144,6 +144,11 @@ class IngestSyncer:
             self._known_ids[name] = current_ids
             report.results.append(result)
 
+        # 사이클 끝에 한 번만 저장한다 -- LexicalIndex.index()/delete() 호출마다
+        # 저장하면 문서가 많은 소스에서 디스크 I/O가 색인 자체보다 느려진다.
+        # persist_path가 없는 LexicalIndex(개발용 기본값)에서는 save()가 no-op.
+        if self.pipeline.lexical_index is not None:
+            self.pipeline.lexical_index.save()
         self._save_state()
         return report
 

@@ -20,10 +20,12 @@ RBAC/시점 필터는 여기서 하지 않는다 -- 색인은 (entity_id, score)
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
 from ontology.schema import EntityType, entity_type_from_id
 
@@ -54,13 +56,47 @@ def tokenize(text: str) -> list[str]:
 
 
 class LexicalIndex:
-    """메모리 상주 역색인. 매 sync 사이클마다 ingest가 다시 채우므로
-    (pipeline/ingest.py) 프로세스가 재시작돼도 별도 복구 절차가 필요 없다."""
+    """역색인. 기본은 메모리 상주이며, 매 sync 사이클마다 ingest가 다시
+    채우므로(pipeline/ingest.py) 그 경우엔 프로세스가 재시작돼도 별도 복구
+    절차가 필요 없다.
 
-    def __init__(self) -> None:
+    persist_path를 주면 얘기가 달라진다 -- IngestSyncer.sync_once()가 사이클
+    끝에 save()를 호출해 postings를 디스크에 JSON으로 남기고, 생성 시
+    _load()가 그 파일이 있으면 즉시 복원한다. 이게 필요한 이유는 그래프/벡터
+    스토어와 달리 이 색인은 영속 백엔드(Chroma/Kuzu)로 바꿔도 자동으로
+    같이 영속화되지 않기 때문이다 -- api/main.py에서 SYNC_ON_STARTUP=false로
+    시작 시 재색인을 건너뛰면, 이 파일이 없는 한 BM25 채널만 매번 빈 채로
+    뜨는 조용한 회귀가 생긴다(그래프/벡터는 영속 백엔드에 이미 데이터가
+    있으므로 겉으로는 정상 작동하는 것처럼 보여서 더 위험하다)."""
+
+    def __init__(self, persist_path: str | Path | None = None) -> None:
         self._postings: dict[str, dict[str, int]] = defaultdict(dict)  # term -> {entity_id: tf}
         self._doc_terms: dict[str, set[str]] = {}                       # delete용 역참조
         self._doc_len: dict[str, int] = {}
+        self.persist_path = Path(persist_path) if persist_path else None
+        self._load()
+
+    def _load(self) -> None:
+        if self.persist_path is None or not self.persist_path.exists():
+            return
+        try:
+            raw = json.loads(self.persist_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        self._postings = defaultdict(dict, {term: dict(tf_by_id) for term, tf_by_id in raw.get("postings", {}).items()})
+        self._doc_terms = {doc_id: set(terms) for doc_id, terms in raw.get("doc_terms", {}).items()}
+        self._doc_len = dict(raw.get("doc_len", {}))
+
+    def save(self) -> None:
+        if self.persist_path is None:
+            return
+        self.persist_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "postings": dict(self._postings),
+            "doc_terms": {doc_id: sorted(terms) for doc_id, terms in self._doc_terms.items()},
+            "doc_len": self._doc_len,
+        }
+        self.persist_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     def __len__(self) -> int:
         return len(self._doc_len)

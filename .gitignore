@@ -16,6 +16,7 @@ data/audit.jsonl
 data/sync_state.json
 data/law_crawl_state.json
 data/embed_cache.json
+data/lexical_index.json
 
 # data/raw/ is intentionally tracked: staged source documents (regulations,
 # etc.) waiting to be ingested. See data/raw/regulation/README.md.

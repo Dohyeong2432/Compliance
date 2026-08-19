@@ -177,9 +177,12 @@ def build_components() -> AppComponents:
     embedder = _build_embedder()
     vector_store = _build_vector_store()
     graph_store = _build_graph_store()
-    # BM25 어휘 색인은 메모리 상주. 아래 IngestPipeline과 HybridRetriever가
-    # 같은 인스턴스를 공유해야 색인한 것을 검색할 수 있다.
-    lexical_index = LexicalIndex()
+    # BM25 어휘 색인은 기본적으로 메모리 상주지만, LEXICAL_INDEX_PATH를 주면
+    # sync 사이클 끝에 디스크로 저장되고 재시작 시 복원된다(knowledge/lexical.py
+    # 참고) -- SYNC_ON_STARTUP=false로 시작 시 재색인을 건너뛸 때 이 색인만
+    # 매번 비어버리는 걸 막기 위해 필요하다. 아래 IngestPipeline과
+    # HybridRetriever가 같은 인스턴스를 공유해야 색인한 것을 검색할 수 있다.
+    lexical_index = LexicalIndex(persist_path=os.environ.get("LEXICAL_INDEX_PATH", "./data/lexical_index.json"))
     retriever = HybridRetriever(
         embedder,
         vector_store,

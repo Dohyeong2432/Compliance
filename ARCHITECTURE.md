@@ -310,11 +310,34 @@ end-to-end로 검증할 수 있습니다). `IngestPipeline`은 `EntityType.REVIE
 나머지 소스는 계속 처리되며, `state_path`를 지정하면 마지막 id 집합을 JSON으로
 영속화해 프로세스 재시작 후에도 삭제 감지가 끊기지 않습니다(다만 그 상태
 자체가 한 번도 기록되기 전에 지워진 문서는 소급 감지할 수 없다는 한계는
-클래스 docstring에 명시해 두었습니다). `api/main.py`의 lifespan이 시작 시
-1회 `sync_once()`를 실행하고, `SYNC_INTERVAL_SECONDS > 0`이면
-`run_forever()`를 백그라운드 태스크로 띄웁니다. `POST /admin/resync`는 이
-주기를 기다리지 않고 즉시 재색인을 트리거합니다(같은 SSO 인증 게이트 사용,
-아직 별도 역할 기반 권한 검사는 없음).
+클래스 docstring에 명시해 두었습니다). `api/main.py`의 lifespan이
+`SYNC_ON_STARTUP`(기본 `true`)이면 시작 시 1회 `sync_once()`를 실행하고,
+`SYNC_INTERVAL_SECONDS > 0`이면 `run_forever()`를 백그라운드 태스크로
+띄웁니다. `POST /admin/resync`는 이 주기를 기다리지 않고 즉시 재색인을
+트리거합니다(같은 SSO 인증 게이트 사용, 아직 별도 역할 기반 권한 검사는
+없음).
+
+**크롤링/임베딩을 서버 프로세스에서 분리하기.** 법령이 몇 개 안 될 때는
+서버가 뜰 때마다 다시 크롤링해도 금방 끝나지만, 운영 규모(watchlist
+164개 등)에서는 이게 매 재시작을 느리게 만드는 부담이 됩니다.
+`scripts/sync.py`가 `build_components()` 후 `sync_once()` 1회만 실행하고
+종료하는 독립 CLI로, cron/작업 스케줄러가 원하는 주기에 서버 프로세스와
+무관하게 돌릴 수 있습니다. 서버는 `SYNC_ON_STARTUP=false`로 띄우면 시작
+시 재색인을 건너뛰고 영속 백엔드(`VECTOR_STORE_BACKEND=chroma`,
+`GRAPH_STORE_BACKEND=kuzu`)에 이미 있는 데이터로 곧장 서빙을 시작합니다.
+
+이 조합에서 놓치기 쉬운 지점 하나: `knowledge/lexical.py`의
+`LexicalIndex`(BM25)는 그래프/벡터 스토어와 별개로 관리되는 순수 메모리
+구조라, 영속 백엔드로 바꿔도 자동으로 같이 영속화되지 않습니다.
+`SYNC_ON_STARTUP=false`로 재색인을 건너뛰면 그래프/벡터는 정상인데
+어휘 검색 채널만 매번 빈 채로 뜨는 조용한 회귀가 생길 수 있다는 뜻입니다
+— 겉으로는 서버가 정상 작동하는 것처럼 보여서 오히려 더 위험합니다.
+`LexicalIndex(persist_path=...)`(`LEXICAL_INDEX_PATH` 환경변수, 기본값
+`./data/lexical_index.json`)가 이 문제를 막습니다: `IngestSyncer.sync_once()`가
+사이클 끝에 한 번 `save()`를 호출해 postings를 JSON으로 저장하고,
+`LexicalIndex` 생성 시점에 그 파일이 있으면 즉시 복원합니다(사이클 중간
+매 `index()`/`delete()`마다 저장하면 문서가 많은 소스에서 디스크 I/O가
+색인 자체보다 느려지므로, 저장은 배치 단위로만 합니다).
 
 ## 테스트로 검증한 시나리오
 

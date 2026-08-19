@@ -36,6 +36,12 @@ def api_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PRECEDENT_DOCS_DIR", str(tmp_path / "no-precedent"))
     monkeypatch.setenv("SYNC_STATE_PATH", str(tmp_path / "sync_state.json"))
     monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("SYNC_ON_STARTUP", "true")
+    # Otherwise these default to ./data/embed_cache.json and
+    # ./data/lexical_index.json (relative to wherever pytest runs from) and
+    # every test run would read/write the real repo's data/ directory.
+    monkeypatch.setenv("EMBED_CACHE_PATH", str(tmp_path / "embed_cache.json"))
+    monkeypatch.setenv("LEXICAL_INDEX_PATH", str(tmp_path / "lexical_index.json"))
     monkeypatch.delenv("LAW_CRAWLER", raising=False)
     monkeypatch.delenv("INTERPRETATION_CRAWLER", raising=False)
     monkeypatch.delenv("CASE_CRAWLER", raising=False)
@@ -158,6 +164,31 @@ def test_startup_sync_ingests_regulation_docs_dir(api_env, monkeypatch, tmp_path
         # startup sync already ran by the time the context manager returns
         assert main_module.app.state.components.graph_store.has_entity("regulation:1")
         del client  # unused, just need the context open through startup
+
+
+def test_sync_on_startup_false_skips_initial_sync(api_env, monkeypatch, tmp_path, require_pandoc):
+    """SYNC_ON_STARTUP=false는 크롤링/임베딩을 서버 프로세스 밖(scripts/sync.py)
+    으로 뺀 배포에서, 서버가 시작 시 그 작업을 다시 하지 않게 하는 스위치다 --
+    데이터가 이미 있는 문서 디렉터리를 가리켜도 startup sync가 실제로
+    건너뛰어지는지 확인한다(반대 케이스는 위 test_startup_sync_ingests_
+    regulation_docs_dir)."""
+    reg_dir = tmp_path / "regulation"
+    reg_dir.mkdir()
+    md = tmp_path / "source.md"
+    md.write_text("테스트 규정\n\n본문 내용", encoding="utf-8")
+    subprocess.run(["pandoc", str(md), "-o", str(reg_dir / "1. 테스트 규정.docx")], check=True)
+    monkeypatch.setenv("REGULATION_DOCS_DIR", str(reg_dir))
+    monkeypatch.setenv("SSO_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("SSO_JWT_SECRET", SECRET)
+    monkeypatch.setenv("SYNC_ON_STARTUP", "false")
+
+    import api.main as main_module
+    import importlib
+
+    importlib.reload(main_module)
+    with TestClient(main_module.app) as client:
+        assert main_module.app.state.components.graph_store.has_entity("regulation:1") is False
+        del client
 
 
 def test_startup_sync_ingests_precedent_docs_dir(api_env, monkeypatch, tmp_path, require_pandoc):

@@ -6,11 +6,22 @@ is derived exclusively from the verified token (see agent.sso) and handed
 to ComplianceAgent, which is the only thing constructed per-request — the
 knowledge backends are built once at startup and shared.
 
-Startup also runs an initial ingest sync (so the app doesn't come up empty)
-and, if SYNC_INTERVAL_SECONDS > 0, spawns a background task that re-syncs
-every source connector on that interval for the lifetime of the process —
-see pipeline/sync.py for what "sync" means here (upsert added/changed docs,
-delete ones that disappeared from their source).
+Startup runs an initial ingest sync by default (so the app doesn't come up
+empty) and, if SYNC_INTERVAL_SECONDS > 0, spawns a background task that
+re-syncs every source connector on that interval for the lifetime of the
+process — see pipeline/sync.py for what "sync" means here (upsert
+added/changed docs, delete ones that disappeared from their source).
+
+SYNC_ON_STARTUP=false skips that initial sync entirely, for deployments where
+crawling/embedding is deliberately moved out of the request-serving process
+(see scripts/sync.py, run separately via cron/systemd timer) and the app
+should just start serving from whatever is already in the persistent
+backends. Only makes sense with VECTOR_STORE_BACKEND=chroma and
+GRAPH_STORE_BACKEND=kuzu — the in-memory backends have nothing to serve from
+if nothing populates them in this process. LexicalIndex(persist_path=...) in
+bootstrap.py is what closes the remaining gap: without it, the BM25 channel
+would still come up empty every restart even with SYNC_ON_STARTUP=false,
+since it doesn't live in either persistent backend.
 """
 
 from __future__ import annotations
@@ -57,17 +68,26 @@ class UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
 
 
+SYNC_ON_STARTUP = os.environ.get("SYNC_ON_STARTUP", "true").lower() != "false"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     components = build_components()
     app.state.components = components
     app.state.llm_client = None
 
-    report = await asyncio.to_thread(components.syncer.sync_once)
-    for r in report.results:
+    if SYNC_ON_STARTUP:
+        report = await asyncio.to_thread(components.syncer.sync_once)
+        for r in report.results:
+            logger.info(
+                "[startup-sync] %s: ingested=%d removed=%d errors=%d",
+                r.name, r.ingested, r.removed, len(r.errors),
+            )
+    else:
         logger.info(
-            "[startup-sync] %s: ingested=%d removed=%d errors=%d",
-            r.name, r.ingested, r.removed, len(r.errors),
+            "[startup-sync] SYNC_ON_STARTUP=false -- 시작 시 재색인을 건너뜁니다. "
+            "영속 백엔드(및 LEXICAL_INDEX_PATH)에 이미 있는 데이터로 서빙을 시작합니다."
         )
 
     sync_task: asyncio.Task | None = None

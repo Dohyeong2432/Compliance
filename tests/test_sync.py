@@ -195,3 +195,24 @@ def test_removed_document_is_dropped_from_the_lexical_index_too():
     syncer.sync_once()
 
     assert lexical_index.search("겸직") == []
+
+
+def test_sync_once_persists_lexical_index_for_a_fresh_process_to_load(tmp_path):
+    """SYNC_ON_STARTUP=false로 서버를 띄우는 배포는 이 파일이 sync_once() 끝에
+    저장돼 있다는 가정 위에서 동작한다 -- 저장이 안 되면 서버가 재시작할 때마다
+    BM25 채널만 빈 채로 뜨는 조용한 회귀가 생긴다."""
+    from knowledge.lexical import LexicalIndex
+
+    persist_path = tmp_path / "lexical_index.json"
+    lexical_index = LexicalIndex(persist_path=persist_path)
+    graph_store = NetworkXGraphStore()
+    vector_store = InMemoryVectorStore()
+    pipeline = IngestPipeline(HashEmbedder(), vector_store, graph_store, lexical_index=lexical_index)
+    connector = FakeConnector([_law_doc("1", title="업무위탁 조항")])
+    syncer = IngestSyncer(pipeline, graph_store, vector_store, {"law": connector})
+
+    syncer.sync_once()
+
+    # 완전히 새 프로세스를 흉내낸다: 같은 파일을 가리키는 새 LexicalIndex.
+    restarted = LexicalIndex(persist_path=persist_path)
+    assert [m.entity_id for m in restarted.search("업무위탁")] == ["law:1"]
