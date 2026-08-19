@@ -50,6 +50,18 @@ from agent.sso import SessionContext, SSOAuthError, SSOConfigError, build_sessio
 from bootstrap import AppComponents, build_components
 from pipeline.connectors.local_file import _SUPPORTED_SUFFIXES, UnparsableDocumentError, _extract_text
 
+# 로거를 만드는 것만으로는 아무것도 출력되지 않는다 -- 파이썬 로깅은 핸들러가
+# 붙은 상위 로거(보통 root)가 있어야 실제로 어딘가에 찍히는데, 이 앱은 지금껏
+# 그걸 설정한 적이 없어서 아래의 startup-sync 결과, /admin/resync 결과,
+# 커넥터 로딩 실패 등 운영에 중요한 INFO 로그가 uvicorn을 그냥 실행해서는
+# 콘솔에 전혀 안 보였다(uvicorn 자신의 access/error 로그와는 별개 -- 그건
+# uvicorn이 자기 로거에 직접 핸들러를 붙여서 보이는 것). LOG_LEVEL로 조절
+# 가능하게 해서, 운영에서 너무 시끄러우면 WARNING으로 낮출 수 있게 한다.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 logger = logging.getLogger("compliance_agent")
 
 
