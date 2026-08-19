@@ -22,11 +22,13 @@ import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+import jwt
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from agent.contract_docx import build_review_document
@@ -81,6 +83,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Group AI Compliance Agent", lifespan=lifespan, default_response_class=UTF8JSONResponse)
+
+# --- POC 전용 대화형 UI (기본 비활성) ---
+# 로그인 화면 없이 바로 질문/답변을 주고받는 로컬 데모용 페이지. SSO의
+# fail-closed 원칙(agent/sso.py)은 건드리지 않는다 -- /poc/token은 그 원칙을
+# 우회하는 게 아니라, make_token.py와 동일한 방식으로 .env에 이미 설정된
+# HS256 시크릿으로 정상적인 서명 토큰을 서버가 대신 발급해 줄 뿐이다. 이
+# 엔드포인트가 살아있으면 인증 없이 누구나 POC_DEPT 권한 토큰을 받아갈 수
+# 있으므로, 반드시 로컬 개발 환경에서만 켠다 -- 공유/운영 환경에서 켜두면
+# 그 자체로 인증 우회 통로가 된다.
+POC_UI_ENABLED = os.environ.get("POC_UI_ENABLED", "").lower() == "true"
+POC_DEPT = os.environ.get("POC_DEPT", "compliance")
+_POC_HTML_PATH = Path(__file__).resolve().parent.parent / "poc" / "chat.html"
 
 
 class ChatRequest(BaseModel):
@@ -246,3 +260,35 @@ def resync(authorization: str | None = Header(default=None)) -> dict:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+if POC_UI_ENABLED:
+
+    @app.get("/poc")
+    def poc_ui() -> FileResponse:
+        return FileResponse(_POC_HTML_PATH, media_type="text/html; charset=utf-8")
+
+    @app.get("/poc/token")
+    def poc_token() -> dict:
+        """POC 페이지가 로드될 때마다 호출해 짧게 사는 토큰을 새로 받는다.
+        POC_DEPT 하나로 고정 -- 부서 선택 UI 없이 바로 질문하는 게 이
+        페이지의 목적이므로, 다른 부서로 테스트하려면 POC_DEPT를 바꿔
+        서버를 재시작한다."""
+        components: AppComponents = app.state.components
+        sso_config = components.sso_config
+        if sso_config is None or sso_config.algorithm != "HS256":
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "POC 토큰 발급에는 로컬 개발용 HS256 SSO 설정이 필요합니다. "
+                    ".env에 SSO_JWT_ALGORITHM=HS256, SSO_JWT_SECRET=<임의의 문자열>을 "
+                    "설정하세요 (make_token.py와 동일한 요구사항)."
+                ),
+            )
+        now = datetime.now(timezone.utc)
+        token = jwt.encode(
+            {"sub": "poc-user", "dept": POC_DEPT, "iat": now, "exp": now + timedelta(hours=4)},
+            sso_config.hs256_secret,
+            algorithm="HS256",
+        )
+        return {"token": token, "dept": POC_DEPT}
